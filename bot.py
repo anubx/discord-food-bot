@@ -8,6 +8,8 @@ import os
 import io
 import base64
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -270,7 +272,27 @@ async def cmd_ping(ctx: commands.Context):
 
 
 # ---------------------------------------------------------------------------
+# Dummy HTTP server so Railway sees a listening port and doesn't kill us
+# ---------------------------------------------------------------------------
+class _Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+    def log_message(self, *args):
+        pass  # silence access logs
+
+def _start_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), _Health)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log.info("Health server listening on port %s", port)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    _start_health_server()
     bot.run(DISCORD_BOT_TOKEN)
