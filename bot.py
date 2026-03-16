@@ -162,6 +162,13 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
+    # Debug logging for all messages in the tracked channel
+    log.info(
+        "Message in #%s (id=%s) from %s | attachments=%s | target_channel=%s",
+        message.channel.name, message.channel.id, message.author,
+        len(message.attachments), DISCORD_CHANNEL_ID,
+    )
+
     # Check if message is in the tracked channel and has image attachments
     if message.channel.id == DISCORD_CHANNEL_ID and message.attachments:
         for attachment in message.attachments:
