@@ -230,6 +230,45 @@ def get_day_meals(user_id: str, day_key: str) -> list[dict]:
     conn.close()
     return [dict(r) for r in rows]
 
+def delete_meal(meal_id: int, user_id: str) -> bool:
+    """Delete a meal by ID. Returns True if deleted."""
+    conn = get_db()
+    cursor = conn.execute(
+        "DELETE FROM meals WHERE id = ? AND user_id = ?",
+        (meal_id, user_id),
+    )
+    conn.commit()
+    deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted
+
+def delete_last_meal(user_id: str, day_key: str) -> dict | None:
+    """Delete the most recent meal for a user on a given day. Returns the deleted meal or None."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM meals WHERE user_id = ? AND day_key = ? ORDER BY timestamp DESC LIMIT 1",
+        (user_id, day_key),
+    ).fetchone()
+    if row:
+        conn.execute("DELETE FROM meals WHERE id = ?", (row["id"],))
+        conn.commit()
+        conn.close()
+        return dict(row)
+    conn.close()
+    return None
+
+def update_meal(meal_id: int, user_id: str, kcal: int, protein: float, carbs: float, fat: float) -> bool:
+    """Update a meal's nutrition values. Returns True if updated."""
+    conn = get_db()
+    cursor = conn.execute(
+        "UPDATE meals SET kcal = ?, protein_g = ?, carbs_g = ?, fat_g = ? WHERE id = ? AND user_id = ?",
+        (kcal, protein, carbs, fat, meal_id, user_id),
+    )
+    conn.commit()
+    updated = cursor.rowcount > 0
+    conn.close()
+    return updated
+
 def get_day_totals(user_id: str, day_key: str) -> dict:
     conn = get_db()
     row = conn.execute(
@@ -636,11 +675,13 @@ The bot analyzes everything for macros and calories automatically.
 `!target <kcal>` — Set your daily calorie target (e.g. `!target 2000`)
 `!budget` — View your remaining calories for today
 `!today` — See all meals you've logged today
+`!undo` — Remove your last logged meal
+`!delete <#>` — Delete a specific meal by number (see numbers with `!today`)
+`!edit <#> kcal=X protein=X` — Edit a meal's values
 `!analyze` — Reply to a food photo to (re-)analyze it
 `!leaderboard` — See today's group rankings
 `!schedule` — View the reminder schedule
-`!commands` — Show this list again
-`!ping` — Health check"""
+`!commands` — Show this list again"""
 
 
 def build_welcome_embed() -> discord.Embed:
@@ -1280,6 +1321,123 @@ async def cmd_leaderboard(ctx: commands.Context):
         timestamp=dt,
     )
     await ctx.reply(embed=embed)
+
+
+@bot.command(name="undo")
+async def cmd_undo(ctx: commands.Context):
+    """Remove your last logged meal for today."""
+    user_id = str(ctx.author.id)
+    dt = now_tz()
+    day_key = get_food_day(dt)
+    deleted = delete_last_meal(user_id, day_key)
+    if deleted:
+        w = MEAL_WINDOWS[deleted["window_idx"]]
+        ts = datetime.fromisoformat(deleted["timestamp"]).strftime("%H:%M")
+        await ctx.reply(
+            f"🗑️ Removed last meal: **{deleted['kcal']} kcal** ({deleted['protein_g']:.0f}P / {deleted['carbs_g']:.0f}C / {deleted['fat_g']:.0f}F) logged at {ts}."
+        )
+    else:
+        await ctx.reply("No meals to undo today.")
+
+
+@bot.command(name="delete")
+async def cmd_delete(ctx: commands.Context, meal_num: int = None):
+    """Delete a specific meal by its number from !today. Usage: !delete 2"""
+    user_id = str(ctx.author.id)
+    dt = now_tz()
+    day_key = get_food_day(dt)
+    meals = get_day_meals(user_id, day_key)
+
+    if not meals:
+        await ctx.reply("No meals logged today.")
+        return
+
+    if meal_num is None:
+        lines = ["Which meal do you want to delete? Use `!delete <number>`\n"]
+        for i, m in enumerate(meals, 1):
+            w = MEAL_WINDOWS[m["window_idx"]]
+            ts = datetime.fromisoformat(m["timestamp"]).strftime("%H:%M")
+            lines.append(f"**{i}.** {w[3]} {ts} — {m['kcal']} kcal ({m['protein_g']:.0f}P / {m['carbs_g']:.0f}C / {m['fat_g']:.0f}F)")
+        await ctx.reply("\n".join(lines))
+        return
+
+    if meal_num < 1 or meal_num > len(meals):
+        await ctx.reply(f"Invalid meal number. Use a number between 1 and {len(meals)}.")
+        return
+
+    meal = meals[meal_num - 1]
+    deleted = delete_meal(meal["id"], user_id)
+    if deleted:
+        ts = datetime.fromisoformat(meal["timestamp"]).strftime("%H:%M")
+        await ctx.reply(f"🗑️ Deleted meal #{meal_num}: **{meal['kcal']} kcal** logged at {ts}.")
+    else:
+        await ctx.reply("Couldn't delete that meal.")
+
+
+@bot.command(name="edit")
+async def cmd_edit(ctx: commands.Context, meal_num: int = None, *, values: str = None):
+    """Edit a meal's nutrition. Usage: !edit 2 kcal=500 protein=30 carbs=50 fat=15"""
+    user_id = str(ctx.author.id)
+    dt = now_tz()
+    day_key = get_food_day(dt)
+    meals = get_day_meals(user_id, day_key)
+
+    if not meals:
+        await ctx.reply("No meals logged today.")
+        return
+
+    if meal_num is None or values is None:
+        lines = ["Edit a meal's values. Usage: `!edit <number> kcal=X protein=X carbs=X fat=X`\n"]
+        lines.append("You can include any combination of values (only specified ones change).\n")
+        for i, m in enumerate(meals, 1):
+            w = MEAL_WINDOWS[m["window_idx"]]
+            ts = datetime.fromisoformat(m["timestamp"]).strftime("%H:%M")
+            lines.append(f"**{i}.** {w[3]} {ts} — {m['kcal']} kcal ({m['protein_g']:.0f}P / {m['carbs_g']:.0f}C / {m['fat_g']:.0f}F)")
+        await ctx.reply("\n".join(lines))
+        return
+
+    if meal_num < 1 or meal_num > len(meals):
+        await ctx.reply(f"Invalid meal number. Use a number between 1 and {len(meals)}.")
+        return
+
+    meal = meals[meal_num - 1]
+
+    # Parse key=value pairs
+    new_kcal = meal["kcal"]
+    new_protein = meal["protein_g"]
+    new_carbs = meal["carbs_g"]
+    new_fat = meal["fat_g"]
+
+    for pair in values.split():
+        if "=" not in pair:
+            continue
+        key, val = pair.split("=", 1)
+        try:
+            num = float(val)
+        except ValueError:
+            await ctx.reply(f"Invalid value for `{key}`: `{val}`. Use a number.")
+            return
+
+        key = key.lower().strip()
+        if key in ("kcal", "cal", "calories"):
+            new_kcal = int(num)
+        elif key in ("protein", "p"):
+            new_protein = num
+        elif key in ("carbs", "c", "carbohydrates"):
+            new_carbs = num
+        elif key in ("fat", "f"):
+            new_fat = num
+        else:
+            await ctx.reply(f"Unknown field: `{key}`. Use: kcal, protein, carbs, fat.")
+            return
+
+    updated = update_meal(meal["id"], user_id, new_kcal, new_protein, new_carbs, new_fat)
+    if updated:
+        await ctx.reply(
+            f"✏️ Updated meal #{meal_num}: **{new_kcal} kcal** ({new_protein:.0f}P / {new_carbs:.0f}C / {new_fat:.0f}F)"
+        )
+    else:
+        await ctx.reply("Couldn't update that meal.")
 
 
 @bot.command(name="analyze")
