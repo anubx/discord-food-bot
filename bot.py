@@ -2008,6 +2008,143 @@ async def cmd_commands(ctx: commands.Context):
     await ctx.reply(embed=build_welcome_embed())
 
 
+# ---------------------------------------------------------------------------
+# !info — Carousel infographic with pagination buttons
+# ---------------------------------------------------------------------------
+INFO_PAGES = [
+    discord.Embed(
+        title="🍽️ FoodTracker — How It Works",
+        description=(
+            "Track your meals, hit your calorie goals, compete with friends.\n\n"
+            "**Get started in 30 seconds:**\n"
+            "1️⃣ Type `!join` in the group channel to get your own private tracking channel\n"
+            "2️⃣ Type `!target 2000` to set your daily calorie target\n"
+            "3️⃣ Start logging meals — the bot handles the rest!"
+        ),
+        color=0xf97316,
+    ),
+    discord.Embed(
+        title="📸 4 Easy Ways to Log Meals",
+        description=(
+            "**📸 Snap a Photo**\n"
+            "Take a pic of your food — AI identifies every item with calories & macros.\n\n"
+            "**📦 Scan a Barcode**\n"
+            "Photo any product barcode for exact nutrition data. Add \"half\" or \"2 spoons\" for portions.\n\n"
+            "**✍️ Type It Out**\n"
+            "Just describe your meal: *\"two eggs, toast with butter, and coffee\"*\n\n"
+            "**🎤 Voice Message**\n"
+            "Record a voice note — the bot transcribes and analyzes it automatically."
+        ),
+        color=0xec4899,
+    ),
+    discord.Embed(
+        title="🤖 What Happens After You Log",
+        description=(
+            "**Step 1 — AI Analyzes**\n"
+            "Identifies foods, estimates portions & macros.\n\n"
+            "**Step 2 — You Get a Breakdown**\n"
+            "Calories, protein, carbs & fat per item + totals.\n\n"
+            "**Step 3 — Budget Updates**\n"
+            "See your remaining kcal split across your meal windows for the rest of the day."
+        ),
+        color=0x8b5cf6,
+    ),
+    discord.Embed(
+        title="✏️ Made a Mistake? Just Reply",
+        description=(
+            "If the bot gets something wrong, **reply to the nutrition breakdown** with your corrections — by text or voice.\n\n"
+            "**Example replies:**\n"
+            "🗣️ *\"the steak is 200g not 300g\"*\n"
+            "🗣️ *\"those aren't radishes, they're tomatoes\"*\n"
+            "🗣️ *\"remove the bread, I didn't eat it\"*\n"
+            "🗣️ *\"add a glass of orange juice\"*\n\n"
+            "💡 You can also use `!undo` to remove the last meal, `!delete 2` to remove a specific meal, or `!edit 2 kcal=400` to manually adjust values."
+        ),
+        color=0x06b6d4,
+    ),
+    discord.Embed(
+        title="⏰ Reminders Throughout the Day",
+        description=(
+            "You'll get a friendly nudge at each meal window:\n\n"
+            "🌅 **8:00** — Breakfast\n"
+            "🍎 **11:00** — Morning Snack\n"
+            "🥗 **14:00** — Lunch\n"
+            "🍌 **17:00** — Afternoon Snack\n"
+            "🍽️ **20:00** — Dinner\n"
+            "🌙 **23:00** — Evening Snack\n\n"
+            "At **4am** you'll get a daily summary with body fat burn/gain estimate."
+        ),
+        color=0x10b981,
+    ),
+    discord.Embed(
+        title="🏆 Compete With Friends",
+        description=(
+            "**🔒 Your Meals, Your Channel**\n"
+            "Your meal photos and data stay in your private channel — only you and the bot can see them.\n\n"
+            "**📢 Group Feed**\n"
+            "Every meal posts a quick summary to the shared group channel so friends can cheer you on.\n\n"
+            "**🏆 Daily Leaderboard**\n"
+            "Who's closest to their calorie target? Check the rankings with `!leaderboard` anytime."
+        ),
+        color=0x3b82f6,
+    ),
+    discord.Embed(
+        title="⌨️ Quick Command Reference",
+        description=(
+            "`!join` — Create your private channel\n"
+            "`!target 2000` — Set daily calorie goal\n"
+            "`!budget` — Remaining kcal for today\n"
+            "`!today` — See all meals logged today\n"
+            "`!undo` — Remove last meal\n"
+            "`!delete 2` — Delete a specific meal\n"
+            "`!edit 2 kcal=400` — Manually fix values\n"
+            "`!leaderboard` — Today's group rankings\n"
+            "`!pro` — View Pro features & status\n"
+            "`!trial` — Start a free 7-day Pro trial\n"
+            "`!schedule` — View reminder times\n"
+            "`!info` — This guide!"
+        ),
+        color=0x8b5cf6,
+    ),
+]
+
+# Set footers with page numbers
+for i, page in enumerate(INFO_PAGES):
+    page.set_footer(text=f"Page {i + 1}/{len(INFO_PAGES)} — Use the buttons to navigate")
+
+
+class InfoCarouselView(discord.ui.View):
+    """Paginated embed carousel for !info command."""
+
+    def __init__(self, author_id: int):
+        super().__init__(timeout=120)
+        self.page = 0
+        self.author_id = author_id
+
+    @discord.ui.button(label="◀ Back", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Use `!info` to get your own carousel!", ephemeral=True)
+            return
+        self.page = (self.page - 1) % len(INFO_PAGES)
+        await interaction.response.edit_message(embed=INFO_PAGES[self.page])
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Use `!info` to get your own carousel!", ephemeral=True)
+            return
+        self.page = (self.page + 1) % len(INFO_PAGES)
+        await interaction.response.edit_message(embed=INFO_PAGES[self.page])
+
+
+@bot.command(name="info")
+async def cmd_info(ctx: commands.Context):
+    """Show the FoodTracker guide as a carousel."""
+    view = InfoCarouselView(author_id=ctx.author.id)
+    await ctx.reply(embed=INFO_PAGES[0], view=view)
+
+
 @bot.command(name="pro")
 async def cmd_pro(ctx: commands.Context):
     """Show premium features and upgrade info."""
