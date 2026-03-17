@@ -1050,6 +1050,78 @@ def build_barcode_analysis(product: dict, multiplier: float = 1.0, quantity_text
     return "\n".join(lines)
 
 
+async def read_nutrition_label(image_bytes: bytes, media_type: str = "image/jpeg",
+                               product_name: str = "", barcode: str = "") -> dict | None:
+    """Try to read a nutrition label/table from an image using Gemini.
+    Returns dict with kcal, protein, carbs, fat, portion_note or None if no label visible."""
+    if not gemini_client:
+        return None
+
+    prompt = (
+        "Look at this product image carefully. Is there a visible nutrition facts table / "
+        "nutrition information label?\n\n"
+        "If YES — extract the EXACT values from the label. Look for: calories (kcal), "
+        "protein (g), carbohydrates (g), and fat (g). Use the 'per serving' values if shown, "
+        "otherwise use 'per 100g'.\n\n"
+        "If NO nutrition label/table is visible, respond with exactly: NO_LABEL\n\n"
+        "If you CAN read the label, respond in this EXACT format (numbers only, no text):\n"
+        "LABEL_FOUND\n"
+        "portion=per serving (50g)\n"
+        "kcal=NUMBER\n"
+        "protein=NUMBER\n"
+        "carbs=NUMBER\n"
+        "fat=NUMBER\n\n"
+        "Use integers only. The portion line should describe what the values are for."
+    )
+
+    try:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                prompt,
+                genai_types.Part.from_bytes(data=image_bytes, mime_type=media_type),
+            ],
+            config=genai_types.GenerateContentConfig(max_output_tokens=256),
+        )
+        _log_gemini_cost("label_read", response.usage_metadata)
+        text = response.text.strip()
+
+        if "NO_LABEL" in text:
+            return None
+
+        if "LABEL_FOUND" not in text:
+            return None
+
+        # Parse the structured response
+        result = {}
+        for line in text.split("\n"):
+            line = line.strip()
+            if "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip().lower()
+            val = val.strip()
+            if key == "portion":
+                result["portion_note"] = val
+            elif key in ("kcal", "protein", "carbs", "fat"):
+                try:
+                    result[key] = int(re.sub(r'[^\d]', '', val))
+                except ValueError:
+                    pass
+
+        # Validate we got all required fields
+        if all(k in result for k in ("kcal", "protein", "carbs", "fat")):
+            result.setdefault("portion_note", "per serving")
+            log.info("Nutrition label read for %s: %s", product_name or barcode, result)
+            return result
+
+        return None
+
+    except Exception as e:
+        log.warning("Label reading failed: %s", e)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Budget / tracking helpers
 # ---------------------------------------------------------------------------
@@ -1615,11 +1687,26 @@ async def on_message(message: discord.Message):
                                         )
                                     log.info("Quantity modifier: '%s' → %sx", qty_text, multiplier)
 
+                                # Try to read nutrition label from the image — prefer over Open Food Facts
+                                ext_bc = attachment.filename.rsplit(".", 1)[-1].lower()
+                                media_map_bc = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp", "gif": "image/gif"}
+                                media_type_bc = media_map_bc.get(ext_bc, "image/jpeg")
+                                label = await read_nutrition_label(image_bytes, media_type_bc, product["name"], barcode)
+                                if label:
+                                    # Override product values with label values
+                                    log.info("Using nutrition label values instead of Open Food Facts for %s", product["name"])
+                                    product["kcal"] = label["kcal"]
+                                    product["protein"] = label["protein"]
+                                    product["carbs"] = label["carbs"]
+                                    product["fat"] = label["fat"]
+                                    product["portion_note"] = f"{label['portion_note']} (from label)"
+
                                 analysis = build_barcode_analysis(product, multiplier, qty_text)
+                                source = "label" if label else "OFF"
                                 thumb = product.get("image_url") or attachment.url
                                 await _process_meal_analysis(
                                     message, analysis,
-                                    f"barcode: {barcode} ({product['name']}) x{multiplier:.2g}",
+                                    f"barcode: {barcode} ({product['name']}) x{multiplier:.2g} [{source}]",
                                     thumbnail_url=thumb,
                                 )
                                 increment_photo_count(user_id)
@@ -1628,13 +1715,45 @@ async def on_message(message: discord.Message):
                             else:
                                 await message.reply(f"📦 Barcode `{barcode}` detected but not found in Open Food Facts. Analyzing the image instead...")
 
-                        # No barcode (or barcode not found) — use OpenAI Vision
+                        # No barcode (or barcode not found) — try label, then AI vision
                         ext = attachment.filename.rsplit(".", 1)[-1].lower()
                         media_map = {
                             "png": "image/png", "jpg": "image/jpeg",
                             "jpeg": "image/jpeg", "webp": "image/webp", "gif": "image/gif",
                         }
                         media_type = media_map.get(ext, "image/jpeg")
+
+                        # Try reading a nutrition label first (no barcode needed)
+                        label = await read_nutrition_label(image_bytes, media_type)
+                        if label:
+                            # Build a product-like dict from the label
+                            label_product = {
+                                "name": "Product (from nutrition label)",
+                                "brand": "",
+                                "kcal": label["kcal"],
+                                "protein": label["protein"],
+                                "carbs": label["carbs"],
+                                "fat": label["fat"],
+                                "portion_note": label["portion_note"],
+                                "image_url": "",
+                                "barcode": "",
+                            }
+                            qty_text = message.content.strip()
+                            multiplier = 1.0
+                            if qty_text:
+                                multiplier = parse_quantity_modifier(qty_text)
+                                if multiplier is None:
+                                    multiplier = await interpret_quantity_with_ai(
+                                        qty_text, "product", label["portion_note"]
+                                    )
+                            analysis = build_barcode_analysis(label_product, multiplier, qty_text)
+                            await _process_meal_analysis(
+                                message, analysis, f"label: {label['kcal']} kcal",
+                                thumbnail_url=attachment.url,
+                            )
+                            increment_photo_count(user_id)
+                            increment_interaction_count(user_id)
+                            continue
 
                         analysis = await analyze_food_image(image_bytes, media_type)
                         await _process_meal_analysis(
