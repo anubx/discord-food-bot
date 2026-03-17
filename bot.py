@@ -39,6 +39,10 @@ import calendar
 from PIL import Image
 from pyzbar.pyzbar import decode as decode_barcodes
 
+import psycopg2
+import psycopg2.pool
+import psycopg2.extras
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -158,22 +162,88 @@ LANGUAGE_NAMES = {"en": "English", "de": "Deutsch"}
 
 
 # ---------------------------------------------------------------------------
-# Database
+# Database — dual mode: PostgreSQL preferred, SQLite fallback
 # ---------------------------------------------------------------------------
-DB_PATH = os.environ.get("DB_PATH", "/app/data/foodbot.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DB_PATH = os.environ.get("DB_PATH", "/app/data/foodbot.db")  # SQLite fallback
+USE_POSTGRES = bool(DATABASE_URL)
 
-def _ensure_db_dir():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+# Connection pool (PostgreSQL)
+_pg_pool = None
 
-def get_db() -> sqlite3.Connection:
-    _ensure_db_dir()
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+def _init_pg_pool():
+    global _pg_pool
+    if _pg_pool is None and USE_POSTGRES:
+        _pg_pool = psycopg2.pool.SimpleConnectionPool(1, 10, DATABASE_URL)
+        log.info("PostgreSQL connection pool initialized")
+
+def get_db():
+    """Get a database connection. Returns a connection object."""
+    if USE_POSTGRES:
+        _init_pg_pool()
+        conn = _pg_pool.getconn()
+        conn.autocommit = False
+        return conn
+    else:
+        # SQLite fallback for local development
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+def release_db(conn):
+    """Release a connection back to the pool (PostgreSQL) or close it (SQLite)."""
+    if USE_POSTGRES and _pg_pool:
+        _pg_pool.putconn(conn)
+    else:
+        conn.close()
+
+def _q(sql: str) -> str:
+    """Convert SQLite-style ? placeholders to PostgreSQL %s if needed."""
+    if USE_POSTGRES:
+        return sql.replace("?", "%s")
+    return sql
+
+def db_execute(conn, sql, params=None):
+    """Execute a query and return the cursor. Handles SQLite/Postgres differences."""
+    sql = _q(sql)
+    if USE_POSTGRES:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params or ())
+        return cur
+    else:
+        if params:
+            return conn.execute(sql, params)
+        return conn.execute(sql)
+
+def db_fetchone(conn, sql, params=None):
+    """Execute and fetch one row."""
+    cur = db_execute(conn, sql, params)
+    row = cur.fetchone()
+    if USE_POSTGRES:
+        cur.close()
+    return row
+
+def db_fetchall(conn, sql, params=None):
+    """Execute and fetch all rows."""
+    cur = db_execute(conn, sql, params)
+    rows = cur.fetchall()
+    if USE_POSTGRES:
+        cur.close()
+    return rows
 
 def init_db():
     conn = get_db()
+    if USE_POSTGRES:
+        _init_pg_schema(conn)
+    else:
+        _init_sqlite_schema(conn)
+    release_db(conn)
+    log.info("Database initialized (%s)", "PostgreSQL" if USE_POSTGRES else "SQLite")
+
+def _init_sqlite_schema(conn):
+    """Initialize SQLite schema."""
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS user_settings (
             user_id         TEXT PRIMARY KEY,
@@ -189,8 +259,7 @@ def init_db():
             interaction_period TEXT,
             protein_target INTEGER,
             fat_target    INTEGER NOT NULL DEFAULT 50,
-            language        TEXT NOT NULL DEFAULT 'en',
-            user_timezone   TEXT
+            bodyfat_consent INTEGER NOT NULL DEFAULT 0,
             language        TEXT NOT NULL DEFAULT 'en',
             user_timezone   TEXT
         );
@@ -268,8 +337,96 @@ def init_db():
             conn.execute(sql)
             log.info("Migrated: added column %s to meals", col)
     conn.commit()
-    conn.close()
-    log.info("Database initialized at %s", DB_PATH)
+
+def _init_pg_schema(conn):
+    """Initialize PostgreSQL schema."""
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id         TEXT PRIMARY KEY,
+            target_kcal     INTEGER NOT NULL DEFAULT 2000,
+            display_name    TEXT,
+            private_channel BIGINT,
+            is_premium      INTEGER NOT NULL DEFAULT 0,
+            premium_since   TEXT,
+            trial_started   TEXT,
+            photo_count_today INTEGER NOT NULL DEFAULT 0,
+            photo_count_day  TEXT,
+            interaction_count INTEGER NOT NULL DEFAULT 0,
+            interaction_period TEXT,
+            protein_target INTEGER,
+            fat_target    INTEGER NOT NULL DEFAULT 50,
+            bodyfat_consent INTEGER NOT NULL DEFAULT 0,
+            language TEXT NOT NULL DEFAULT 'en',
+            user_timezone TEXT
+        );
+        CREATE TABLE IF NOT EXISTS meals (
+            id          SERIAL PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            day_key     TEXT NOT NULL,
+            window_idx  INTEGER NOT NULL,
+            timestamp   TEXT NOT NULL,
+            kcal        INTEGER NOT NULL,
+            protein_g   REAL NOT NULL DEFAULT 0,
+            carbs_g     REAL NOT NULL DEFAULT 0,
+            fat_g       REAL NOT NULL DEFAULT 0,
+            description TEXT,
+            raw_analysis TEXT,
+            photo_url   TEXT,
+            water_ml    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_meals_user_day ON meals(user_id, day_key);
+        CREATE TABLE IF NOT EXISTS weight_log (
+            id        SERIAL PRIMARY KEY,
+            user_id   TEXT NOT NULL,
+            day_key   TEXT NOT NULL,
+            weight_kg REAL NOT NULL,
+            timestamp TEXT NOT NULL,
+            UNIQUE(user_id, day_key)
+        );
+        CREATE TABLE IF NOT EXISTS water_log (
+            id        SERIAL PRIMARY KEY,
+            user_id   TEXT NOT NULL,
+            day_key   TEXT NOT NULL,
+            amount_ml INTEGER NOT NULL,
+            source    TEXT,
+            timestamp TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_water_user_day ON water_log(user_id, day_key);
+        CREATE TABLE IF NOT EXISTS body_fat_log (
+            id        SERIAL PRIMARY KEY,
+            user_id   TEXT NOT NULL,
+            day_key   TEXT NOT NULL,
+            bf_pct    REAL NOT NULL,
+            method    TEXT NOT NULL DEFAULT 'navy',
+            timestamp TEXT NOT NULL,
+            UNIQUE(user_id, day_key)
+        );
+    """)
+    conn.commit()
+    cur.close()
+
+    # Run migrations for any missing columns
+    cur = conn.cursor()
+    cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'user_settings'")
+    existing_cols = {row[0] for row in cur.fetchall()}
+    cur.close()
+
+    pg_migrations = {
+        "bodyfat_consent": "ALTER TABLE user_settings ADD COLUMN bodyfat_consent INTEGER NOT NULL DEFAULT 0",
+        "language": "ALTER TABLE user_settings ADD COLUMN language TEXT NOT NULL DEFAULT 'en'",
+        "user_timezone": "ALTER TABLE user_settings ADD COLUMN user_timezone TEXT",
+    }
+    cur = conn.cursor()
+    for col, sql in pg_migrations.items():
+        if col not in existing_cols:
+            try:
+                cur.execute(sql)
+                log.info("PG migrated: added column %s", col)
+            except Exception:
+                conn.rollback()
+    conn.commit()
+    cur.close()
 
 # ---------------------------------------------------------------------------
 # Time / window helpers
@@ -280,20 +437,17 @@ def now_tz() -> datetime:
 def get_user_timezone(user_id: str) -> str:
     """Return user's timezone or fall back to TIMEZONE env var."""
     conn = get_db()
-    row = conn.execute("SELECT user_timezone FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
+    row = db_fetchone(conn, "SELECT user_timezone FROM user_settings WHERE user_id = ?", (user_id,))
+    release_db(conn)
     if row and row["user_timezone"]:
         return row["user_timezone"]
     return TIMEZONE
 
 def set_user_timezone(user_id: str, tz_str: str):
     conn = get_db()
-    conn.execute(
-        "UPDATE user_settings SET user_timezone = ? WHERE user_id = ?",
-        (tz_str, user_id),
-    )
+    db_execute(conn, "UPDATE user_settings SET user_timezone = ? WHERE user_id = ?", (tz_str, user_id))
     conn.commit()
-    conn.close()
+    release_db(conn)
 
 def now_user(user_id: str) -> datetime:
     """Get current time in user's timezone."""
@@ -302,17 +456,17 @@ def now_user(user_id: str) -> datetime:
 
 def get_user_language(user_id: str) -> str:
     conn = get_db()
-    row = conn.execute("SELECT language FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
+    row = db_fetchone(conn, "SELECT language FROM user_settings WHERE user_id = ?", (user_id,))
+    release_db(conn)
     if row and row["language"]:
         return row["language"]
     return "en"
 
 def set_user_language(user_id: str, lang: str):
     conn = get_db()
-    conn.execute("UPDATE user_settings SET language = ? WHERE user_id = ?", (lang, user_id))
+    db_execute(conn, "UPDATE user_settings SET language = ? WHERE user_id = ?", (lang, user_id))
     conn.commit()
-    conn.close()
+    release_db(conn)
 
 def t(user_id: str, key: str, **kwargs) -> str:
     """Get translated string for a user."""
@@ -322,55 +476,6 @@ def t(user_id: str, key: str, **kwargs) -> str:
     if kwargs:
         text = text.format(**kwargs)
     return text
-
-
-def get_user_timezone(user_id: str) -> str:
-    """Return user's timezone or fall back to TIMEZONE env var."""
-    conn = get_db()
-    row = conn.execute("SELECT user_timezone FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    if row and row["user_timezone"]:
-        return row["user_timezone"]
-    return TIMEZONE
-
-def set_user_timezone(user_id: str, tz_str: str):
-    conn = get_db()
-    conn.execute(
-        "UPDATE user_settings SET user_timezone = ? WHERE user_id = ?",
-        (tz_str, user_id),
-    )
-    conn.commit()
-    conn.close()
-
-def now_user(user_id: str) -> datetime:
-    """Get current time in user's timezone."""
-    tz = get_user_timezone(user_id)
-    return datetime.now(ZoneInfo(tz))
-
-def get_user_language(user_id: str) -> str:
-    conn = get_db()
-    row = conn.execute("SELECT language FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    if row and row["language"]:
-        return row["language"]
-    return "en"
-
-def set_user_language(user_id: str, lang: str):
-    conn = get_db()
-    conn.execute("UPDATE user_settings SET language = ? WHERE user_id = ?", (lang, user_id))
-    conn.commit()
-    conn.close()
-
-def t(user_id: str, key: str, **kwargs) -> str:
-    """Get translated string for a user."""
-    lang = get_user_language(user_id)
-    translations = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
-    text = translations.get(key, TRANSLATIONS["en"].get(key, key))
-    if kwargs:
-        text = text.format(**kwargs)
-    return text
-
-    return datetime.now(ZoneInfo(TIMEZONE))
 
 def get_food_day(dt: datetime) -> str:
     if dt.hour < 4:
@@ -416,28 +521,28 @@ def is_last_window(dt: datetime) -> bool:
 # ---------------------------------------------------------------------------
 def get_target_kcal(user_id: str) -> int | None:
     conn = get_db()
-    row = conn.execute("SELECT target_kcal FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
+    row = db_fetchone(conn, "SELECT target_kcal FROM user_settings WHERE user_id = ?", (user_id,))
+    release_db(conn)
     return row["target_kcal"] if row else None
 
 def set_target_kcal(user_id: str, kcal: int):
     conn = get_db()
-    conn.execute(
+    db_execute(conn,
         "INSERT INTO user_settings (user_id, target_kcal) VALUES (?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET target_kcal = ?",
         (user_id, kcal, kcal),
     )
     conn.commit()
-    conn.close()
+    release_db(conn)
 
 def get_macro_targets(user_id: str) -> dict | None:
     """Return {'kcal': int, 'protein': int|None, 'fat': int, 'carbs': int|None} or None."""
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT target_kcal, protein_target, fat_target FROM user_settings WHERE user_id = ?",
         (user_id,),
-    ).fetchone()
-    conn.close()
+    )
+    release_db(conn)
     if not row:
         return None
     kcal = row["target_kcal"]
@@ -455,33 +560,33 @@ def set_macro_targets(user_id: str, protein: int | None = None, fat: int | None 
     """Set protein and/or fat targets. Fat minimum is 30g."""
     conn = get_db()
     if protein is not None and fat is not None:
-        conn.execute(
+        db_execute(conn,
             "UPDATE user_settings SET protein_target = ?, fat_target = ? WHERE user_id = ?",
             (protein, max(30, fat), user_id),
         )
     elif protein is not None:
-        conn.execute(
+        db_execute(conn,
             "UPDATE user_settings SET protein_target = ? WHERE user_id = ?",
             (protein, user_id),
         )
     elif fat is not None:
-        conn.execute(
+        db_execute(conn,
             "UPDATE user_settings SET fat_target = ? WHERE user_id = ?",
             (max(30, fat), user_id),
         )
     conn.commit()
-    conn.close()
+    release_db(conn)
 
 
 def get_streak(user_id: str) -> int:
     """Count consecutive days (ending today or yesterday) where the user logged meals
     and stayed at or under their kcal target. Returns 0 if no streak."""
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT target_kcal FROM user_settings WHERE user_id = ?", (user_id,)
-    ).fetchone()
+    )
     if not row or not row["target_kcal"]:
-        conn.close()
+        release_db(conn)
         return 0
     target = row["target_kcal"]
 
@@ -494,11 +599,11 @@ def get_streak(user_id: str) -> int:
     check_date = datetime.strptime(today, "%Y-%m-%d")
     while True:
         day_key = check_date.strftime("%Y-%m-%d")
-        row = conn.execute(
+        row = db_fetchone(conn,
             "SELECT COALESCE(SUM(kcal),0) as total, COUNT(*) as cnt "
             "FROM meals WHERE user_id = ? AND day_key = ?",
             (user_id, day_key),
-        ).fetchone()
+        )
         if row["cnt"] == 0:
             # No meals logged — streak broken (unless it's today and just not logged yet)
             if day_key == today:
@@ -511,7 +616,7 @@ def get_streak(user_id: str) -> int:
         streak += 1
         check_date -= timedelta(days=1)
 
-    conn.close()
+    release_db(conn)
     return streak
 
 
@@ -519,7 +624,7 @@ def get_period_totals(user_id: str, start_date: str, end_date: str) -> dict:
     """Get aggregated totals for a date range (inclusive). Returns dict with
     total_kcal, total_protein, total_carbs, total_fat, meal_count, days_logged, daily_breakdown."""
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT COALESCE(SUM(kcal),0) as total_kcal, "
         "COALESCE(SUM(protein_g),0) as total_protein, "
         "COALESCE(SUM(carbs_g),0) as total_carbs, "
@@ -528,17 +633,17 @@ def get_period_totals(user_id: str, start_date: str, end_date: str) -> dict:
         "COUNT(DISTINCT day_key) as days_logged "
         "FROM meals WHERE user_id = ? AND day_key >= ? AND day_key <= ?",
         (user_id, start_date, end_date),
-    ).fetchone()
+    )
 
     # Daily breakdown for fat warning check
-    daily_rows = conn.execute(
+    daily_rows = db_fetchall(conn,
         "SELECT day_key, SUM(fat_g) as day_fat, SUM(kcal) as day_kcal, "
         "SUM(protein_g) as day_protein, SUM(carbs_g) as day_carbs "
         "FROM meals WHERE user_id = ? AND day_key >= ? AND day_key <= ? "
         "GROUP BY day_key ORDER BY day_key",
         (user_id, start_date, end_date),
-    ).fetchall()
-    conn.close()
+    )
+    release_db(conn)
 
     result = dict(row)
     result["daily_breakdown"] = [dict(r) for r in daily_rows]
@@ -553,42 +658,42 @@ def log_weight(user_id: str, weight_kg: float) -> bool:
     day_key = get_food_day(now_tz())
     conn = get_db()
     try:
-        conn.execute(
+        db_execute(conn,
             "INSERT INTO weight_log (user_id, day_key, weight_kg, timestamp) VALUES (?, ?, ?, ?)",
             (user_id, day_key, weight_kg, now_tz().isoformat()),
         )
         conn.commit()
-        conn.close()
+        release_db(conn)
         return True
-    except sqlite3.IntegrityError:
-        conn.execute(
+    except (sqlite3.IntegrityError, psycopg2.IntegrityError):
+        db_execute(conn,
             "UPDATE weight_log SET weight_kg = ?, timestamp = ? WHERE user_id = ? AND day_key = ?",
             (weight_kg, now_tz().isoformat(), user_id, day_key),
         )
         conn.commit()
-        conn.close()
+        release_db(conn)
         return False
 
 
 def get_weight_history(user_id: str, limit: int = 30) -> list[dict]:
     """Get recent weight entries, newest first."""
     conn = get_db()
-    rows = conn.execute(
+    rows = db_fetchall(conn,
         "SELECT * FROM weight_log WHERE user_id = ? ORDER BY day_key DESC LIMIT ?",
         (user_id, limit),
-    ).fetchall()
-    conn.close()
+    )
+    release_db(conn)
     return [dict(r) for r in rows]
 
 
 def get_weight_for_period(user_id: str, start_date: str, end_date: str) -> list[dict]:
     """Get weight entries for a date range."""
     conn = get_db()
-    rows = conn.execute(
+    rows = db_fetchall(conn,
         "SELECT * FROM weight_log WHERE user_id = ? AND day_key >= ? AND day_key <= ? ORDER BY day_key",
         (user_id, start_date, end_date),
-    ).fetchall()
-    conn.close()
+    )
+    release_db(conn)
     return [dict(r) for r in rows]
 
 
@@ -601,39 +706,39 @@ def add_water(user_id: str, amount_ml: int, source: str = "manual") -> int:
     """Log water intake. Returns total water for today."""
     day_key = get_food_day(now_tz())
     conn = get_db()
-    conn.execute(
+    db_execute(conn,
         "INSERT INTO water_log (user_id, day_key, amount_ml, source, timestamp) VALUES (?, ?, ?, ?, ?)",
         (user_id, day_key, amount_ml, source, now_tz().isoformat()),
     )
     conn.commit()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT COALESCE(SUM(amount_ml), 0) as total FROM water_log WHERE user_id = ? AND day_key = ?",
         (user_id, day_key),
-    ).fetchone()
-    conn.close()
+    )
+    release_db(conn)
     return row["total"]
 
 
 def get_day_water(user_id: str, day_key: str) -> int:
     """Get total water intake in ml for a given day."""
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT COALESCE(SUM(amount_ml), 0) as total FROM water_log WHERE user_id = ? AND day_key = ?",
         (user_id, day_key),
-    ).fetchone()
-    conn.close()
+    )
+    release_db(conn)
     return row["total"]
 
 
 def get_period_water(user_id: str, start_date: str, end_date: str) -> dict:
     """Get water totals for a period. Returns {total_ml, days_logged, daily_avg}."""
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT COALESCE(SUM(amount_ml), 0) as total_ml, COUNT(DISTINCT day_key) as days_logged "
         "FROM water_log WHERE user_id = ? AND day_key >= ? AND day_key <= ?",
         (user_id, start_date, end_date),
-    ).fetchone()
-    conn.close()
+    )
+    release_db(conn)
     result = dict(row)
     result["daily_avg"] = result["total_ml"] / result["days_logged"] if result["days_logged"] else 0
     return result
@@ -659,21 +764,21 @@ def navy_body_fat(gender: str, height_cm: float, waist_cm: float, neck_cm: float
 def get_bodyfat_consent(user_id: str) -> bool:
     """Check if user has consented to body fat tracking."""
     conn = get_db()
-    row = conn.execute("SELECT bodyfat_consent FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
+    row = db_fetchone(conn, "SELECT bodyfat_consent FROM user_settings WHERE user_id = ?", (user_id,))
+    release_db(conn)
     return bool(row["bodyfat_consent"]) if row else False
 
 
 def set_bodyfat_consent(user_id: str, consent: bool):
     """Set body fat tracking consent."""
     conn = get_db()
-    conn.execute(
+    db_execute(conn,
         "INSERT INTO user_settings (user_id, bodyfat_consent) VALUES (?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET bodyfat_consent = ?",
         (user_id, int(consent), int(consent)),
     )
     conn.commit()
-    conn.close()
+    release_db(conn)
 
 
 def log_bodyfat(user_id: str, bf_pct: float, method: str = "navy"):
@@ -681,78 +786,78 @@ def log_bodyfat(user_id: str, bf_pct: float, method: str = "navy"):
     day_key = get_food_day(now_tz())
     conn = get_db()
     try:
-        conn.execute(
+        db_execute(conn,
             "INSERT INTO body_fat_log (user_id, day_key, bf_pct, method, timestamp) VALUES (?, ?, ?, ?, ?)",
             (user_id, day_key, bf_pct, method, now_tz().isoformat()),
         )
         conn.commit()
-        conn.close()
+        release_db(conn)
         return True
-    except sqlite3.IntegrityError:
-        conn.execute(
+    except (sqlite3.IntegrityError, psycopg2.IntegrityError):
+        db_execute(conn,
             "UPDATE body_fat_log SET bf_pct = ?, timestamp = ? WHERE user_id = ? AND day_key = ?",
             (bf_pct, now_tz().isoformat(), user_id, day_key),
         )
         conn.commit()
-        conn.close()
+        release_db(conn)
         return False
 
 
 def get_bodyfat_history(user_id: str, limit: int = 30) -> list[dict]:
     """Get recent body fat entries, newest first."""
     conn = get_db()
-    rows = conn.execute(
+    rows = db_fetchall(conn,
         "SELECT * FROM body_fat_log WHERE user_id = ? ORDER BY day_key DESC LIMIT ?",
         (user_id, limit),
-    ).fetchall()
-    conn.close()
+    )
+    release_db(conn)
     return [dict(r) for r in rows]
 
 def get_day_photo_urls(user_id: str, day_key: str) -> list[str]:
     """Get all photo URLs for a user's meals on a given day."""
     conn = get_db()
-    rows = conn.execute(
+    rows = db_fetchall(conn,
         "SELECT photo_url FROM meals WHERE user_id = ? AND day_key = ? AND photo_url IS NOT NULL ORDER BY timestamp",
         (user_id, day_key),
-    ).fetchall()
-    conn.close()
+    )
+    release_db(conn)
     return [row["photo_url"] for row in rows]
 
 
 def get_user_private_channel(user_id: str) -> int | None:
     conn = get_db()
-    row = conn.execute("SELECT private_channel FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
+    row = db_fetchone(conn, "SELECT private_channel FROM user_settings WHERE user_id = ?", (user_id,))
+    release_db(conn)
     if row and row["private_channel"]:
         return row["private_channel"]
     return None
 
 def set_user_private_channel(user_id: str, channel_id: int, display_name: str):
     conn = get_db()
-    conn.execute(
+    db_execute(conn,
         "INSERT INTO user_settings (user_id, private_channel, display_name) VALUES (?, ?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET private_channel = ?, display_name = ?",
         (user_id, channel_id, display_name, channel_id, display_name),
     )
     conn.commit()
-    conn.close()
+    release_db(conn)
 
 def get_all_tracked_channel_ids() -> set[int]:
     conn = get_db()
-    rows = conn.execute("SELECT private_channel FROM user_settings WHERE private_channel IS NOT NULL").fetchall()
-    conn.close()
+    rows = db_fetchall(conn, "SELECT private_channel FROM user_settings WHERE private_channel IS NOT NULL")
+    release_db(conn)
     return {row["private_channel"] for row in rows}
 
 def get_all_users() -> list[dict]:
     conn = get_db()
-    rows = conn.execute("SELECT * FROM user_settings").fetchall()
-    conn.close()
+    rows = db_fetchall(conn, "SELECT * FROM user_settings")
+    release_db(conn)
     return [dict(r) for r in rows]
 
 def get_user_by_channel(channel_id: int) -> dict | None:
     conn = get_db()
-    row = conn.execute("SELECT * FROM user_settings WHERE private_channel = ?", (channel_id,)).fetchone()
-    conn.close()
+    row = db_fetchone(conn, "SELECT * FROM user_settings WHERE private_channel = ?", (channel_id,))
+    release_db(conn)
     return dict(row) if row else None
 
 def add_meal(user_id: str, day_key: str, window_idx: int, kcal: int,
@@ -761,91 +866,100 @@ def add_meal(user_id: str, day_key: str, window_idx: int, kcal: int,
              photo_url: str | None = None, water_ml: int = 0) -> int:
     """Insert a meal and return the new meal ID."""
     conn = get_db()
-    cursor = conn.execute(
-        "INSERT INTO meals (user_id, day_key, window_idx, timestamp, kcal, protein_g, carbs_g, fat_g, description, raw_analysis, photo_url, water_ml) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (user_id, day_key, window_idx, now_tz().isoformat(), kcal, protein, carbs, fat, description, raw_analysis, photo_url, water_ml),
-    )
-    meal_id = cursor.lastrowid
+    if USE_POSTGRES:
+        cur = conn.cursor()
+        cur.execute(_q(
+            "INSERT INTO meals (user_id, day_key, window_idx, timestamp, kcal, protein_g, carbs_g, fat_g, description, raw_analysis, photo_url, water_ml) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"
+        ), (user_id, day_key, window_idx, now_tz().isoformat(), kcal, protein, carbs, fat, description, raw_analysis, photo_url, water_ml))
+        meal_id = cur.fetchone()[0]
+        cur.close()
+    else:
+        cursor = conn.execute(
+            "INSERT INTO meals (user_id, day_key, window_idx, timestamp, kcal, protein_g, carbs_g, fat_g, description, raw_analysis, photo_url, water_ml) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, day_key, window_idx, now_tz().isoformat(), kcal, protein, carbs, fat, description, raw_analysis, photo_url, water_ml),
+        )
+        meal_id = cursor.lastrowid
     conn.commit()
-    conn.close()
+    release_db(conn)
     return meal_id
 
 def get_day_meals(user_id: str, day_key: str) -> list[dict]:
     conn = get_db()
-    rows = conn.execute(
+    rows = db_fetchall(conn,
         "SELECT * FROM meals WHERE user_id = ? AND day_key = ? ORDER BY timestamp",
         (user_id, day_key),
-    ).fetchall()
-    conn.close()
+    )
+    release_db(conn)
     return [dict(r) for r in rows]
 
 def get_last_meal(user_id: str, day_key: str) -> dict | None:
     """Get the most recent meal for a user on a given day."""
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT * FROM meals WHERE user_id = ? AND day_key = ? ORDER BY timestamp DESC LIMIT 1",
         (user_id, day_key),
-    ).fetchone()
-    conn.close()
+    )
+    release_db(conn)
     return dict(row) if row else None
 
 def update_meal_full(meal_id: int, user_id: str, kcal: int, protein: float,
                      carbs: float, fat: float, description: str, raw_analysis: str) -> bool:
     """Update a meal's nutrition values and analysis text. Returns True if updated."""
     conn = get_db()
-    cursor = conn.execute(
+    cur = db_execute(conn,
         "UPDATE meals SET kcal = ?, protein_g = ?, carbs_g = ?, fat_g = ?, description = ?, raw_analysis = ? "
         "WHERE id = ? AND user_id = ?",
         (kcal, protein, carbs, fat, description, raw_analysis, meal_id, user_id),
     )
     conn.commit()
-    updated = cursor.rowcount > 0
-    conn.close()
+    updated = cur.rowcount > 0
+    release_db(conn)
     return updated
 
 def delete_meal(meal_id: int, user_id: str) -> bool:
     """Delete a meal by ID. Returns True if deleted."""
     conn = get_db()
-    cursor = conn.execute(
+    cur = db_execute(conn,
         "DELETE FROM meals WHERE id = ? AND user_id = ?",
         (meal_id, user_id),
     )
     conn.commit()
-    deleted = cursor.rowcount > 0
-    conn.close()
+    deleted = cur.rowcount > 0
+    release_db(conn)
     return deleted
 
 def delete_last_meal(user_id: str, day_key: str) -> dict | None:
     """Delete the most recent meal for a user on a given day. Returns the deleted meal or None."""
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT * FROM meals WHERE user_id = ? AND day_key = ? ORDER BY timestamp DESC LIMIT 1",
         (user_id, day_key),
-    ).fetchone()
+    )
     if row:
-        conn.execute("DELETE FROM meals WHERE id = ?", (row["id"],))
+        db_execute(conn, "DELETE FROM meals WHERE id = ?", (row["id"],))
         conn.commit()
-        conn.close()
+        release_db(conn)
         return dict(row)
-    conn.close()
+    release_db(conn)
     return None
 
 def update_meal(meal_id: int, user_id: str, kcal: int, protein: float, carbs: float, fat: float) -> bool:
     """Update a meal's nutrition values. Returns True if updated."""
     conn = get_db()
-    cursor = conn.execute(
+    cur = db_execute(conn,
         "UPDATE meals SET kcal = ?, protein_g = ?, carbs_g = ?, fat_g = ? WHERE id = ? AND user_id = ?",
         (kcal, protein, carbs, fat, meal_id, user_id),
     )
     conn.commit()
-    updated = cursor.rowcount > 0
-    conn.close()
+    updated = cur.rowcount > 0
+    release_db(conn)
     return updated
 
 def get_day_totals(user_id: str, day_key: str) -> dict:
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT COALESCE(SUM(kcal),0) as total_kcal, "
         "COALESCE(SUM(protein_g),0) as total_protein, "
         "COALESCE(SUM(carbs_g),0) as total_carbs, "
@@ -853,8 +967,8 @@ def get_day_totals(user_id: str, day_key: str) -> dict:
         "COUNT(*) as meal_count "
         "FROM meals WHERE user_id = ? AND day_key = ?",
         (user_id, day_key),
-    ).fetchone()
-    conn.close()
+    )
+    release_db(conn)
     return dict(row)
 
 # ---------------------------------------------------------------------------
@@ -916,11 +1030,11 @@ def increment_daily_hard_cap(user_id: str):
 def is_premium(user_id: str) -> bool:
     """Check if a user has an active premium subscription or trial."""
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT is_premium, trial_started FROM user_settings WHERE user_id = ?",
         (user_id,),
-    ).fetchone()
-    conn.close()
+    )
+    release_db(conn)
     if not row:
         return False
     if row["is_premium"]:
@@ -936,11 +1050,11 @@ def is_premium(user_id: str) -> bool:
 def get_trial_days_left(user_id: str) -> int | None:
     """Return remaining trial days, or None if no trial / expired."""
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT trial_started, is_premium FROM user_settings WHERE user_id = ?",
         (user_id,),
-    ).fetchone()
-    conn.close()
+    )
+    release_db(conn)
     if not row or row["is_premium"]:
         return None
     trial = row["trial_started"]
@@ -953,33 +1067,33 @@ def get_trial_days_left(user_id: str) -> int | None:
 def start_trial(user_id: str):
     """Start the 7-day free trial for a user."""
     conn = get_db()
-    conn.execute(
+    db_execute(conn,
         "UPDATE user_settings SET trial_started = ? WHERE user_id = ?",
         (now_tz().isoformat(), user_id),
     )
     conn.commit()
-    conn.close()
+    release_db(conn)
 
 def set_premium(user_id: str, active: bool):
     """Set or remove premium status for a user."""
     conn = get_db()
-    conn.execute(
+    db_execute(conn,
         "UPDATE user_settings SET is_premium = ?, premium_since = ? WHERE user_id = ?",
         (1 if active else 0, now_tz().isoformat() if active else None, user_id),
     )
     conn.commit()
-    conn.close()
+    release_db(conn)
 
 def check_photo_cap(user_id: str) -> tuple[bool, int]:
     """Check if user is under the daily photo cap. Returns (allowed, remaining)."""
     day_key = get_food_day(now_tz())
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT photo_count_today, photo_count_day FROM user_settings WHERE user_id = ?",
         (user_id,),
-    ).fetchone()
+    )
     if not row:
-        conn.close()
+        release_db(conn)
         return True, DAILY_PHOTO_CAP
 
     count = row["photo_count_today"] or 0
@@ -988,13 +1102,13 @@ def check_photo_cap(user_id: str) -> tuple[bool, int]:
     # Reset if it's a new day
     if count_day != day_key:
         count = 0
-        conn.execute(
+        db_execute(conn,
             "UPDATE user_settings SET photo_count_today = 0, photo_count_day = ? WHERE user_id = ?",
             (day_key, user_id),
         )
         conn.commit()
 
-    conn.close()
+    release_db(conn)
     remaining = DAILY_PHOTO_CAP - count
     return count < DAILY_PHOTO_CAP, max(0, remaining)
 
@@ -1002,12 +1116,12 @@ def increment_photo_count(user_id: str):
     """Increment the daily photo analysis counter."""
     day_key = get_food_day(now_tz())
     conn = get_db()
-    conn.execute(
+    db_execute(conn,
         "UPDATE user_settings SET photo_count_today = photo_count_today + 1, photo_count_day = ? WHERE user_id = ?",
         (day_key, user_id),
     )
     conn.commit()
-    conn.close()
+    release_db(conn)
 
 def check_interaction_cap(user_id: str) -> tuple[bool, int]:
     """Check if user is within their interaction cap.
@@ -1016,12 +1130,12 @@ def check_interaction_cap(user_id: str) -> tuple[bool, int]:
     """
     premium = is_premium(user_id)
     conn = get_db()
-    row = conn.execute(
+    row = db_fetchone(conn,
         "SELECT interaction_count, interaction_period FROM user_settings WHERE user_id = ?",
         (user_id,),
-    ).fetchone()
+    )
     if not row:
-        conn.close()
+        release_db(conn)
         cap = PREMIUM_MONTHLY_CAP if premium else FREE_DAILY_CAP
         return True, cap
 
@@ -1040,13 +1154,13 @@ def check_interaction_cap(user_id: str) -> tuple[bool, int]:
     # Reset if new period
     if period != current_period:
         count = 0
-        conn.execute(
+        db_execute(conn,
             "UPDATE user_settings SET interaction_count = 0, interaction_period = ? WHERE user_id = ?",
             (current_period, user_id),
         )
         conn.commit()
 
-    conn.close()
+    release_db(conn)
     remaining = cap - count
     return count < cap, max(0, remaining)
 
@@ -1055,12 +1169,12 @@ def increment_interaction_count(user_id: str):
     premium = is_premium(user_id)
     current_period = now_tz().strftime("%Y-%m") if premium else get_food_day(now_tz())
     conn = get_db()
-    conn.execute(
+    db_execute(conn,
         "UPDATE user_settings SET interaction_count = interaction_count + 1, interaction_period = ? WHERE user_id = ?",
         (current_period, user_id),
     )
     conn.commit()
-    conn.close()
+    release_db(conn)
 
 PREMIUM_UPSELL = f"""⚡ **You've hit your daily limit!**
 
@@ -2198,13 +2312,13 @@ async def on_message(message: discord.Message):
         if not existing:
             # Register with default target
             conn = get_db()
-            conn.execute(
+            db_execute(conn,
                 "INSERT INTO user_settings (user_id, target_kcal, display_name) VALUES (?, ?, ?) "
                 "ON CONFLICT(user_id) DO UPDATE SET display_name = ?",
                 (user_id, 2000, message.author.display_name, message.author.display_name),
             )
             conn.commit()
-            conn.close()
+            release_db(conn)
             log.info("Auto-registered user %s (%s) on first DM", user_id, message.author.display_name)
             # Send welcome message
             try:
@@ -2232,12 +2346,12 @@ async def on_message(message: discord.Message):
         else:
             # Update display_name if it changed
             conn = get_db()
-            conn.execute(
+            db_execute(conn,
                 "UPDATE user_settings SET display_name = ? WHERE user_id = ?",
                 (message.author.display_name, user_id),
             )
             conn.commit()
-            conn.close()
+            release_db(conn)
     
     log.info(
         "Message in #%s (id=%s) from %s | DM=%s | attachments=%s | content_len=%s",
@@ -3187,8 +3301,8 @@ async def cmd_trial(ctx: commands.Context):
 
     # Check if trial was already used (trial_started exists but expired)
     conn = get_db()
-    row = conn.execute("SELECT trial_started FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
+    row = db_fetchone(conn, "SELECT trial_started FROM user_settings WHERE user_id = ?", (user_id,))
+    release_db(conn)
     if row and row["trial_started"]:
         await ctx.reply(
             f"Your free trial has expired. You're back to **{FREE_DAILY_CAP} interactions/day**.\n\n"
@@ -3977,9 +4091,9 @@ async def cmd_bodyfat(ctx: commands.Context, subcommand: str = None, *args):
     if subcommand.lower() == "delete":
         set_bodyfat_consent(user_id, False)
         conn = get_db()
-        conn.execute("DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
+        db_execute(conn, "DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
         conn.commit()
-        conn.close()
+        release_db(conn)
         await ctx.reply("✅ All body fat data deleted and consent revoked.")
         return
     
@@ -4045,15 +4159,15 @@ async def cmd_deletedata(ctx: commands.Context, confirm: str = None):
     conn = get_db()
     try:
         # Delete all user data
-        conn.execute("DELETE FROM meals WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM weight_log WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM water_log WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
-        conn.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+        db_execute(conn, "DELETE FROM meals WHERE user_id = ?", (user_id,))
+        db_execute(conn, "DELETE FROM weight_log WHERE user_id = ?", (user_id,))
+        db_execute(conn, "DELETE FROM water_log WHERE user_id = ?", (user_id,))
+        db_execute(conn, "DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
+        db_execute(conn, "DELETE FROM user_settings WHERE user_id = ?", (user_id,))
         conn.commit()
         log.info("GDPR deletion: user %s deleted all data", user_id)
     finally:
-        conn.close()
+        release_db(conn)
     
     await ctx.reply(
         "✅ **All your data has been permanently deleted.**\n"
@@ -4150,24 +4264,24 @@ def export_meals_csv(user_id: str, start_date: str = None, end_date: str = None)
     """Export meals to CSV. If no dates, export all."""
     conn = get_db()
     if start_date and end_date:
-        rows = conn.execute(
+        rows = db_fetchall(conn,
             "SELECT day_key, timestamp, kcal, protein_g, carbs_g, fat_g, description, water_ml "
             "FROM meals WHERE user_id = ? AND day_key >= ? AND day_key <= ? ORDER BY timestamp",
             (user_id, start_date, end_date),
-        ).fetchall()
+        )
     else:
-        rows = conn.execute(
+        rows = db_fetchall(conn,
             "SELECT day_key, timestamp, kcal, protein_g, carbs_g, fat_g, description, water_ml "
             "FROM meals WHERE user_id = ? ORDER BY timestamp",
             (user_id,),
-        ).fetchall()
-    conn.close()
-    
+        )
+    release_db(conn)
+
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["Date", "Timestamp", "Calories", "Protein (g)", "Carbs (g)", "Fat (g)", "Description", "Water (ml)"])
     for r in rows:
-        writer.writerow([r["day_key"], r["timestamp"], r["kcal"], "{:.1f}".format(r["protein_g"]), 
+        writer.writerow([r["day_key"], r["timestamp"], r["kcal"], "{:.1f}".format(r["protein_g"]),
                         "{:.1f}".format(r["carbs_g"]), "{:.1f}".format(r["fat_g"]), r["description"] or "", r["water_ml"]])
     output.seek(0)
     return output
@@ -4200,13 +4314,13 @@ async def slash_join(interaction: discord.Interaction, kcal: int = None):
         return
     
     conn = get_db()
-    conn.execute(
+    db_execute(conn,
         "INSERT INTO user_settings (user_id, target_kcal, display_name) VALUES (?, ?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET target_kcal = ?, display_name = ?",
         (user_id, kcal, interaction.user.display_name, kcal, interaction.user.display_name),
     )
     conn.commit()
-    conn.close()
+    release_db(conn)
     log.info("User %s set calorie target to %d", user_id, kcal)
     await interaction.response.send_message(
         f"✅ Daily calorie target set to **{kcal} kcal**.\n"
@@ -4219,7 +4333,7 @@ async def slash_join(interaction: discord.Interaction, kcal: int = None):
 async def slash_target(interaction: discord.Interaction, kcal: int = None):
     """Set your daily calorie target"""
     user_id = str(interaction.user.id)
-    
+
     if kcal is None:
         current = get_target_kcal(user_id)
         if current:
@@ -4227,19 +4341,19 @@ async def slash_target(interaction: discord.Interaction, kcal: int = None):
         else:
             await interaction.response.send_message("No target set. Use `/target 2000` to set one.")
         return
-    
+
     if kcal < 800 or kcal > 5000:
         await interaction.response.send_message("⚠️ That seems extreme. Use a reasonable range: 800–5000 kcal.")
         return
-    
+
     conn = get_db()
-    conn.execute(
+    db_execute(conn,
         "INSERT INTO user_settings (user_id, target_kcal) VALUES (?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET target_kcal = ?",
         (user_id, kcal, kcal),
     )
     conn.commit()
-    conn.close()
+    release_db(conn)
     await interaction.response.send_message(
         f"✅ Daily calorie target set to **{kcal} kcal**.\n"
         f"💡 Now set your protein goal: `/macros protein=150`"
@@ -4814,9 +4928,9 @@ async def slash_bodyfat(interaction: discord.Interaction, subcommand: app_comman
     if subcmd == "delete":
         set_bodyfat_consent(user_id, False)
         conn = get_db()
-        conn.execute("DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
+        db_execute(conn, "DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
         conn.commit()
-        conn.close()
+        release_db(conn)
         await interaction.response.send_message("✅ All body fat data deleted and consent revoked.")
         return
     
@@ -4887,15 +5001,15 @@ async def slash_deletedata(interaction: discord.Interaction, confirm: str = None
     if confirm.lower() != "confirm":
         await interaction.response.send_message("⚠️ Type `/deletedata confirm` to permanently delete your data.")
         return
-    
+
     conn = get_db()
-    conn.execute("DELETE FROM meals WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM weight_log WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM water_log WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+    db_execute(conn, "DELETE FROM meals WHERE user_id = ?", (user_id,))
+    db_execute(conn, "DELETE FROM weight_log WHERE user_id = ?", (user_id,))
+    db_execute(conn, "DELETE FROM water_log WHERE user_id = ?", (user_id,))
+    db_execute(conn, "DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
+    db_execute(conn, "DELETE FROM user_settings WHERE user_id = ?", (user_id,))
     conn.commit()
-    conn.close()
+    release_db(conn)
     log.info("User %s deleted all their data", user_id)
     await interaction.response.send_message("✅ All your data has been permanently deleted. You can start fresh anytime by messaging me.")
 

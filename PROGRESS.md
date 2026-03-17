@@ -9,7 +9,8 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 
 ### Core Infrastructure
 - [x] Discord.py bot with privileged intents (Message Content, Server Members)
-- [x] SQLite database with WAL mode for meal + user data
+- [x] **PostgreSQL** database with connection pooling (psycopg2, SimpleConnectionPool 1-10 connections)
+- [x] **SQLite fallback** for local development (auto-detected via `DATABASE_URL` env var)
 - [x] Railway deployment with Dockerfile, persistent volume, health server on port 8080
 - [x] APScheduler for cron-based reminders (Berlin timezone)
 - [x] GitHub repo: `anubx/discord-food-bot`
@@ -167,7 +168,7 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 | Voice transcription (fallback) | OpenAI Whisper | Best-in-class speech-to-text, handles multiple languages |
 | Barcode database | Open Food Facts | Free, no API key required, large product database |
 | Barcode decoding | pyzbar + Pillow | Lightweight, works offline, no API needed |
-| Database | SQLite + WAL | Simple, no extra service needed, persistent via Railway volume |
+| Database | **PostgreSQL** (+ SQLite fallback) | Concurrent writes, connection pooling, scales to 1000+ users. SQLite auto-fallback when `DATABASE_URL` not set |
 | Hosting | Railway | Easy Docker deploys, persistent volumes, auto-restart |
 | Channel architecture | **DM-based** + shared group | All tracking via DMs for genuine privacy; group channel for leaderboard only |
 | Day boundary | 4am | Late-night snacks count as same day, natural sleep boundary |
@@ -198,7 +199,7 @@ These are evaluated but not yet built. Listed in order of when they'll likely be
 |---------|--------------|----------------|
 | ~~**Rate limiting**~~ | ✅ **Done** | 3s per-user cooldown + 100/day absolute cap. In-memory dict, resets on restart. Prevents API cost spikes from spam |
 | ~~**Slash commands**~~ | ✅ **Done** | 26 slash commands mirroring all prefix commands. Both systems run in parallel. Dropdown choices, parameter hints, deferred responses |
-| **PostgreSQL migration** | ~50+ concurrent users | SQLite has single-writer lock. Once meal reminders trigger 50+ users logging simultaneously, you'll see "database is locked" errors. Postgres handles concurrent writes natively. Railway offers managed Postgres as add-on |
+| ~~**PostgreSQL migration**~~ | ✅ **Done** | psycopg2 with SimpleConnectionPool (1-10 conns). Dual-mode: auto-detects PostgreSQL via `DATABASE_URL`, falls back to SQLite for local dev. `_q()` helper converts placeholders, `db_fetchone`/`db_fetchall` abstract cursor differences |
 | **Redis caching** | ~200+ users hitting `!budget` at same time | Every `!budget` is 4+ DB queries. Redis caches these at ~1ms vs ~5ms SQLite. Matters when reminder goes out and hundreds check budget at once. Railway offers Redis add-on |
 | **Web dashboard** | Post-traction, premium differentiator | Website for charts, trends, history outside Discord. "MyFitnessPal lite" companion. Major selling point for premium. Significant effort (auth, frontend, API) but natural growth path |
 | **Health app integrations** | After web dashboard | Apple Health, Google Fit, MyFitnessPal sync. Holy grail but requires OAuth flows, webhooks, platform APIs. Apple Health needs native app (ruled out). Google Fit has REST API. CSV export is the stepping stone |
@@ -510,7 +511,7 @@ Expected ~$0.00015/interaction with Gemini 2.5 Flash Lite. Needs live testing to
 ### Technical Improvements (see "Technical Roadmap" section above for detailed analysis)
 - [x] ~~Rate limiting~~ — **Done.** 3s cooldown + 100/day hard cap, in-memory
 - [x] ~~Slash commands~~ — **Done.** 26 `/` commands alongside `!` prefix, auto-sync, choices, deferred responses
-- [ ] PostgreSQL migration for better concurrency at scale (~50+ concurrent users)
+- [x] ~~PostgreSQL migration~~ — **Done.** Dual-mode (Postgres + SQLite fallback), connection pool, `_q()` placeholder conversion
 - [ ] Redis caching for frequent DB queries (~200+ users)
 - [ ] Dashboard web UI for viewing history/charts outside Discord
 - [ ] Webhook integration for MyFitnessPal / Apple Health / Google Fit
@@ -524,6 +525,7 @@ Expected ~$0.00015/interaction with Gemini 2.5 Flash Lite. Needs live testing to
 | Service | Cost | Notes |
 |---------|------|-------|
 | Railway hosting | ~$5/month | Starter plan, single container |
+| PostgreSQL (Railway add-on or Neon) | ~$0-5/month | Free tier covers small usage; Railway add-on or Neon serverless |
 | **Gemini 2.5 Flash Lite** (primary) | $0.10/1M in, $0.40/1M out | All modalities: text, image, audio |
 | OpenAI API (fallback only) | $2.50/1M in, $10.00/1M out | GPT-4o Vision + Whisper |
 | Anthropic API (fallback only) | $3.00/1M in, $15.00/1M out | Claude Sonnet |
