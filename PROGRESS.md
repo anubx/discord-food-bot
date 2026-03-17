@@ -51,6 +51,25 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 - [x] **Monthly report** — auto-sent 1st of month 5:00am + `!monthly` command. Includes: monthly averages, week-by-week breakdown, body composition estimate, fat intake warnings
 - [x] **Fat health warning** — if fat intake stays below 50g for more than 2 days/week, weekly report flags it: "for optimal hormonal health, keep fat intake above 50g"
 
+### Meal Photo Gallery
+- [x] **Photo URLs stored** — all meal photos saved in DB for later retrieval
+- [x] **Daily meal GIF** — at 4am, all day's meal photos stitched into an animated GIF (2s per frame, 480px)
+- [x] **GIF attached to daily summary** — appears below the personal summary embed
+- [x] **`!history`** — view any day's meals + photo GIF (`!history 2026-03-16`)
+
+### Weight Tracking
+- [x] **`!weight 82.5`** — log daily weight (kg), one entry per day (updates if re-logged)
+- [x] **Weight history** — `!weight` shows last 14 entries with trend arrows
+- [x] **Morning weight prompt** — 8am private channel message asks to log weight, shows last entry + delta
+- [x] **Weight in reports** — weekly/monthly reports show weight trend (start → end + change)
+
+### Water Tracking
+- [x] **AI water estimation** — Gemini estimates water content in food (ml), auto-logged per meal
+- [x] **`!water 250`** — manual water logging (ml), shows progress bar
+- [x] **Post-meal water prompt** — after each meal, shows food water auto-logged + asks about drinks
+- [x] **Daily water target** — 2500ml default, tracked in `!budget` and daily summary
+- [x] **Water in reports** — weekly/monthly reports show average daily water intake
+
 ### Meal Corrections
 - [x] `!undo` — remove last logged meal
 - [x] `!delete <#>` — delete specific meal by number
@@ -295,9 +314,9 @@ Expected ~$0.00015/interaction with Gemini 2.5 Flash Lite. Needs live testing to
 - [x] ~~Macro targets~~ — **Done.** Protein-first system with auto-calculated carbs, 30g fat minimum, fat health warnings
 
 ### Medium Impact
-- [ ] Meal photo gallery — `!history` to browse past meals with thumbnails
-- [ ] Weight logging + progress chart (`!weight 82.5`)
-- [ ] Water intake tracking
+- [x] ~~Meal photo gallery~~ — **Done.** `!history` with daily GIF + photo GIF in daily summary
+- [x] ~~Weight logging~~ — **Done.** `!weight`, morning prompt, trends in reports
+- [x] ~~Water intake tracking~~ — **Done.** AI food water estimation + `!water` + post-meal prompts + daily target
 - [ ] Meal templates / favorites — save and reuse frequent meals (`!save breakfast1`, `!log breakfast1`)
 - [ ] Recipe analysis — paste a recipe URL and get per-serving macros
 - [ ] Restaurant menu lookup — "I'm eating at McDonald's, Big Mac combo"

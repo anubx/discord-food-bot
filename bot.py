@@ -115,9 +115,28 @@ def init_db():
             carbs_g     REAL NOT NULL DEFAULT 0,
             fat_g       REAL NOT NULL DEFAULT 0,
             description TEXT,
-            raw_analysis TEXT
+            raw_analysis TEXT,
+            photo_url   TEXT,
+            water_ml    INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_meals_user_day ON meals(user_id, day_key);
+        CREATE TABLE IF NOT EXISTS weight_log (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id   TEXT NOT NULL,
+            day_key   TEXT NOT NULL,
+            weight_kg REAL NOT NULL,
+            timestamp TEXT NOT NULL,
+            UNIQUE(user_id, day_key)
+        );
+        CREATE TABLE IF NOT EXISTS water_log (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id   TEXT NOT NULL,
+            day_key   TEXT NOT NULL,
+            amount_ml INTEGER NOT NULL,
+            source    TEXT,
+            timestamp TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_water_user_day ON water_log(user_id, day_key);
     """)
     # Migration: add premium columns if they don't exist yet
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(user_settings)").fetchall()}
@@ -136,6 +155,16 @@ def init_db():
         if col not in existing_cols:
             conn.execute(sql)
             log.info("Migrated: added column %s to user_settings", col)
+    # Meals table migrations
+    meal_cols = {row[1] for row in conn.execute("PRAGMA table_info(meals)").fetchall()}
+    meal_migrations = {
+        "photo_url": "ALTER TABLE meals ADD COLUMN photo_url TEXT",
+        "water_ml": "ALTER TABLE meals ADD COLUMN water_ml INTEGER NOT NULL DEFAULT 0",
+    }
+    for col, sql in meal_migrations.items():
+        if col not in meal_cols:
+            conn.execute(sql)
+            log.info("Migrated: added column %s to meals", col)
     conn.commit()
     conn.close()
     log.info("Database initialized at %s", DB_PATH)
@@ -319,6 +348,111 @@ def get_period_totals(user_id: str, start_date: str, end_date: str) -> dict:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Weight tracking helpers
+# ---------------------------------------------------------------------------
+def log_weight(user_id: str, weight_kg: float) -> bool:
+    """Log weight for today. Returns True if inserted, False if updated."""
+    day_key = get_food_day(now_tz())
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO weight_log (user_id, day_key, weight_kg, timestamp) VALUES (?, ?, ?, ?)",
+            (user_id, day_key, weight_kg, now_tz().isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.execute(
+            "UPDATE weight_log SET weight_kg = ?, timestamp = ? WHERE user_id = ? AND day_key = ?",
+            (weight_kg, now_tz().isoformat(), user_id, day_key),
+        )
+        conn.commit()
+        conn.close()
+        return False
+
+
+def get_weight_history(user_id: str, limit: int = 30) -> list[dict]:
+    """Get recent weight entries, newest first."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM weight_log WHERE user_id = ? ORDER BY day_key DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_weight_for_period(user_id: str, start_date: str, end_date: str) -> list[dict]:
+    """Get weight entries for a date range."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM weight_log WHERE user_id = ? AND day_key >= ? AND day_key <= ? ORDER BY day_key",
+        (user_id, start_date, end_date),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Water tracking helpers
+# ---------------------------------------------------------------------------
+DAILY_WATER_TARGET_ML = 2500  # default recommended daily intake
+
+def add_water(user_id: str, amount_ml: int, source: str = "manual") -> int:
+    """Log water intake. Returns total water for today."""
+    day_key = get_food_day(now_tz())
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO water_log (user_id, day_key, amount_ml, source, timestamp) VALUES (?, ?, ?, ?, ?)",
+        (user_id, day_key, amount_ml, source, now_tz().isoformat()),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount_ml), 0) as total FROM water_log WHERE user_id = ? AND day_key = ?",
+        (user_id, day_key),
+    ).fetchone()
+    conn.close()
+    return row["total"]
+
+
+def get_day_water(user_id: str, day_key: str) -> int:
+    """Get total water intake in ml for a given day."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount_ml), 0) as total FROM water_log WHERE user_id = ? AND day_key = ?",
+        (user_id, day_key),
+    ).fetchone()
+    conn.close()
+    return row["total"]
+
+
+def get_period_water(user_id: str, start_date: str, end_date: str) -> dict:
+    """Get water totals for a period. Returns {total_ml, days_logged, daily_avg}."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount_ml), 0) as total_ml, COUNT(DISTINCT day_key) as days_logged "
+        "FROM water_log WHERE user_id = ? AND day_key >= ? AND day_key <= ?",
+        (user_id, start_date, end_date),
+    ).fetchone()
+    conn.close()
+    result = dict(row)
+    result["daily_avg"] = result["total_ml"] / result["days_logged"] if result["days_logged"] else 0
+    return result
+
+
+def get_day_photo_urls(user_id: str, day_key: str) -> list[str]:
+    """Get all photo URLs for a user's meals on a given day."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT photo_url FROM meals WHERE user_id = ? AND day_key = ? AND photo_url IS NOT NULL ORDER BY timestamp",
+        (user_id, day_key),
+    ).fetchall()
+    conn.close()
+    return [row["photo_url"] for row in rows]
+
+
 def get_user_private_channel(user_id: str) -> int | None:
     conn = get_db()
     row = conn.execute("SELECT private_channel FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
@@ -357,15 +491,19 @@ def get_user_by_channel(channel_id: int) -> dict | None:
 
 def add_meal(user_id: str, day_key: str, window_idx: int, kcal: int,
              protein: float, carbs: float, fat: float,
-             description: str, raw_analysis: str):
+             description: str, raw_analysis: str,
+             photo_url: str | None = None, water_ml: int = 0) -> int:
+    """Insert a meal and return the new meal ID."""
     conn = get_db()
-    conn.execute(
-        "INSERT INTO meals (user_id, day_key, window_idx, timestamp, kcal, protein_g, carbs_g, fat_g, description, raw_analysis) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (user_id, day_key, window_idx, now_tz().isoformat(), kcal, protein, carbs, fat, description, raw_analysis),
+    cursor = conn.execute(
+        "INSERT INTO meals (user_id, day_key, window_idx, timestamp, kcal, protein_g, carbs_g, fat_g, description, raw_analysis, photo_url, water_ml) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, day_key, window_idx, now_tz().isoformat(), kcal, protein, carbs, fat, description, raw_analysis, photo_url, water_ml),
     )
+    meal_id = cursor.lastrowid
     conn.commit()
     conn.close()
+    return meal_id
 
 def get_day_meals(user_id: str, day_key: str) -> list[dict]:
     conn = get_db()
@@ -644,22 +782,36 @@ ANALYSIS_SYSTEM_PROMPT = """You are a nutrition analysis assistant. When given a
 1. **Identified foods** — list every item with its estimated weight in grams (e.g., "Chicken breast (~200g)")
 2. **Estimated macros per item** (protein, carbs, fat in grams)
 3. **Estimated calories per item**
-4. **Meal totals** — sum of protein, carbs, fat, and total kcal
+4. **Estimated water content** — how much water (in ml) is in the food (e.g., soup ~300ml, salad ~150ml, dry snack ~5ml)
+5. **Meal totals** — sum of protein, carbs, fat, total kcal, and water
 
 IMPORTANT: Always include the estimated weight (grams) next to each food item. This helps the user verify portion sizes.
 
 Be concise. Use a clean table format. If you're uncertain about portion sizes, state your assumptions. Always give your best estimate rather than refusing.
 
 IMPORTANT: At the very end of your response, include a single line in this exact format:
-$$TOTALS: kcal=NUMBER, protein=NUMBER, carbs=NUMBER, fat=NUMBER$$
+$$TOTALS: kcal=NUMBER, protein=NUMBER, carbs=NUMBER, fat=NUMBER, water=NUMBER$$
+
+The water value is estimated ml of water contained IN the food itself.
 
 For example:
-$$TOTALS: kcal=650, protein=45, carbs=60, fat=22$$
+$$TOTALS: kcal=650, protein=45, carbs=60, fat=22, water=180$$
 
 This line must contain only integers (no decimals). This is used for automated tracking."""
 
 
 def parse_totals(analysis: str) -> dict:
+    # Try new format with water first
+    match = re.search(r'\$\$TOTALS:\s*kcal=(\d+),\s*protein=(\d+),\s*carbs=(\d+),\s*fat=(\d+),\s*water=(\d+)\$\$', analysis)
+    if match:
+        return {
+            "kcal": int(match.group(1)),
+            "protein": float(match.group(2)),
+            "carbs": float(match.group(3)),
+            "fat": float(match.group(4)),
+            "water_ml": int(match.group(5)),
+        }
+    # Fallback: old format without water
     match = re.search(r'\$\$TOTALS:\s*kcal=(\d+),\s*protein=(\d+),\s*carbs=(\d+),\s*fat=(\d+)\$\$', analysis)
     if match:
         return {
@@ -667,12 +819,13 @@ def parse_totals(analysis: str) -> dict:
             "protein": float(match.group(2)),
             "carbs": float(match.group(3)),
             "fat": float(match.group(4)),
+            "water_ml": 0,
         }
     kcal_match = re.search(r'(\d[,\d]*)\s*(?:kcal|calories|cal)\b', analysis, re.IGNORECASE)
     if kcal_match:
         kcal_str = kcal_match.group(1).replace(",", "")
-        return {"kcal": int(kcal_str), "protein": 0, "carbs": 0, "fat": 0}
-    return {"kcal": 0, "protein": 0, "carbs": 0, "fat": 0}
+        return {"kcal": int(kcal_str), "protein": 0, "carbs": 0, "fat": 0, "water_ml": 0}
+    return {"kcal": 0, "protein": 0, "carbs": 0, "fat": 0, "water_ml": 0}
 
 
 def strip_totals_line(analysis: str) -> str:
@@ -730,14 +883,17 @@ TEXT_ANALYSIS_SYSTEM_PROMPT = """You are a nutrition analysis assistant. The use
 1. **Identified foods** — list every item with its estimated weight in grams (e.g., "Chicken breast (~200g)")
 2. **Estimated macros per item** (protein, carbs, fat in grams)
 3. **Estimated calories per item**
-4. **Meal totals** — sum of protein, carbs, fat, and total kcal
+4. **Estimated water content** — how much water (in ml) is in the food (e.g., soup ~300ml, salad ~150ml, dry snack ~5ml)
+5. **Meal totals** — sum of protein, carbs, fat, total kcal, and water
 
 IMPORTANT: Always include the estimated weight (grams) next to each food item. This helps the user verify portion sizes.
 
 Be concise. Use a clean table format. If the user doesn't specify portion sizes, assume typical serving sizes and state your assumptions.
 
 IMPORTANT: At the very end of your response, include a single line in this exact format:
-$$TOTALS: kcal=NUMBER, protein=NUMBER, carbs=NUMBER, fat=NUMBER$$
+$$TOTALS: kcal=NUMBER, protein=NUMBER, carbs=NUMBER, fat=NUMBER, water=NUMBER$$
+
+The water value is estimated ml of water contained IN the food itself.
 
 This line must contain only integers (no decimals). This is used for automated tracking."""
 
@@ -782,14 +938,15 @@ Provide the corrected full analysis with:
 1. **Corrected foods** — updated list with estimated weight in grams (e.g., "Chicken breast (~200g)")
 2. **Estimated macros per item** (protein, carbs, fat in grams)
 3. **Estimated calories per item**
-4. **Meal totals** — updated sum of protein, carbs, fat, and total kcal
+4. **Estimated water content** — ml of water in the food
+5. **Meal totals** — updated sum of protein, carbs, fat, total kcal, and water
 
 IMPORTANT: Always include the estimated weight (grams) next to each food item.
 
 Be concise. Use a clean table format.
 
 IMPORTANT: At the very end of your response, include a single line in this exact format:
-$$TOTALS: kcal=NUMBER, protein=NUMBER, carbs=NUMBER, fat=NUMBER$$
+$$TOTALS: kcal=NUMBER, protein=NUMBER, carbs=NUMBER, fat=NUMBER, water=NUMBER$$
 
 This line must contain only integers (no decimals). This is used for automated tracking."""
 
@@ -1174,6 +1331,11 @@ def build_budget_text(user_id: str, day_key: str, dt: datetime) -> str:
     else:
         lines.append(f"📊 Today so far: {totals['total_protein']:.0f}g P / {totals['total_carbs']:.0f}g C / {totals['total_fat']:.0f}g F")
 
+    # Water progress
+    day_water = get_day_water(user_id, day_key)
+    water_pct = min(100, int(day_water / DAILY_WATER_TARGET_ML * 100))
+    lines.append(f"💧 Water: **{day_water}ml** / {DAILY_WATER_TARGET_ML}ml ({water_pct}%)")
+
     if remaining > 0 and num_windows > 0:
         lines.append(f"\n📅 **Budget per remaining window** (~{per_window} kcal each):")
         for i in future_windows:
@@ -1244,9 +1406,12 @@ e.g. *"the steak is 200g not 300g, the radish are tomatoes"*
 `!edit <#> kcal=X protein=X` — Edit a meal's values
 `!analyze` — Reply to a food photo to (re-)analyze it
 `!macros protein=X fat=X` — Set macro targets (carbs auto-calculated)
+`!weight 82.5` — Log your weight (kg)
+`!water 250` — Log water intake (ml)
 `!streak` — View your streak of days on target
 `!weekly` — Weekly summary report with trends
 `!monthly` — Monthly summary report
+`!history` — View a day's meals + photo GIF
 `!leaderboard` — See today's group rankings
 `!schedule` — View the reminder schedule
 `!pro` — View Pro features and your subscription status
@@ -1392,6 +1557,50 @@ async def send_reminders(label: str, emoji: str):
     log.info("Sent %s reminders to %d users", label, len(users))
 
 
+async def build_day_gif(user_id: str, day_key: str) -> io.BytesIO | None:
+    """Download all meal photos for a day and stitch them into an animated GIF.
+    Returns a BytesIO buffer with the GIF or None if no photos."""
+    photo_urls = get_day_photo_urls(user_id, day_key)
+    if len(photo_urls) < 1:
+        return None
+
+    frames = []
+    for url in photo_urls:
+        try:
+            resp = http_requests.get(url, timeout=15)
+            if resp.status_code != 200:
+                continue
+            img = Image.open(io.BytesIO(resp.content))
+            # Resize to consistent size for GIF
+            img = img.convert("RGB")
+            img.thumbnail((480, 480), Image.LANCZOS)
+            # Pad to square
+            size = max(img.size)
+            square = Image.new("RGB", (size, size), (30, 30, 30))
+            offset = ((size - img.width) // 2, (size - img.height) // 2)
+            square.paste(img, offset)
+            frames.append(square)
+        except Exception as e:
+            log.warning("Failed to download meal photo %s: %s", url[:80], e)
+            continue
+
+    if not frames:
+        return None
+
+    # If only one photo, duplicate it so GIF is still valid
+    if len(frames) == 1:
+        frames.append(frames[0])
+
+    buf = io.BytesIO()
+    frames[0].save(
+        buf, format="GIF", save_all=True, append_images=frames[1:],
+        duration=2000, loop=0, optimize=True,
+    )
+    buf.seek(0)
+    log.info("Built day GIF for user %s on %s: %d frames, %d bytes", user_id, day_key, len(frames), buf.getbuffer().nbytes)
+    return buf
+
+
 async def send_daily_summary():
     """4am: send personal summaries to private channels + group summary to group channel."""
     dt = now_tz()
@@ -1450,6 +1659,13 @@ async def send_daily_summary():
 
         lines.append(f"🍽️ {totals['meal_count']} meals logged")
 
+        # Water
+        day_water = get_day_water(user_id, prev_day)
+        if day_water > 0:
+            pct = min(100, int(day_water / DAILY_WATER_TARGET_ML * 100))
+            water_emoji = "✅" if day_water >= DAILY_WATER_TARGET_ML else "💧"
+            lines.append(f"{water_emoji} Water: **{day_water}ml** / {DAILY_WATER_TARGET_ML}ml ({pct}%)")
+
         # Streak
         user_streak = get_streak(user_id)
         if user_streak > 0:
@@ -1468,8 +1684,16 @@ async def send_daily_summary():
             color=discord.Color.purple(),
             timestamp=dt,
         )
+
+        # Build and attach meal photo GIF
         try:
-            await channel.send(embed=embed)
+            gif_buf = await build_day_gif(user_id, prev_day)
+            if gif_buf:
+                gif_file = discord.File(gif_buf, filename=f"meals-{prev_day}.gif")
+                embed.set_image(url=f"attachment://meals-{prev_day}.gif")
+                await channel.send(embed=embed, file=gif_file)
+            else:
+                await channel.send(embed=embed)
         except Exception as e:
             log.warning("Failed to send summary to %s: %s", ch_id, e)
 
@@ -1489,11 +1713,40 @@ async def send_daily_summary():
 
 
 async def send_morning_overview():
-    """8am: send welcome/overview to group channel."""
+    """8am: send welcome/overview to group channel + weight prompt to private channels."""
     group_channel = bot.get_channel(GROUP_CHANNEL_ID)
     if group_channel:
         await group_channel.send(embed=build_welcome_embed())
         log.info("Sent morning overview to group channel")
+
+    # Send weight prompt to each user's private channel
+    users = get_all_users()
+    for u in users:
+        ch_id = u.get("private_channel")
+        if not ch_id:
+            continue
+        channel = bot.get_channel(ch_id)
+        if not channel:
+            continue
+        user_id = u["user_id"]
+        history = get_weight_history(user_id, limit=2)
+        if history:
+            last = history[0]
+            weight_line = f"⚖️ **Good morning!** Your last weigh-in: **{last['weight_kg']:.1f} kg** ({last['day_key']})"
+            if len(history) >= 2:
+                diff = last["weight_kg"] - history[1]["weight_kg"]
+                if diff < 0:
+                    weight_line += f" — down {abs(diff):.1f}kg 📉"
+                elif diff > 0:
+                    weight_line += f" — up {diff:.1f}kg 📈"
+            weight_line += "\nLog today's weight: `!weight 82.5`"
+        else:
+            weight_line = "⚖️ **Good morning!** Start tracking your weight: `!weight 82.5`"
+        try:
+            await channel.send(weight_line)
+        except Exception as e:
+            log.warning("Failed to send weight prompt to %s: %s", ch_id, e)
+    log.info("Sent morning weight prompts to %d users", len(users))
 
 
 # ---------------------------------------------------------------------------
@@ -1832,13 +2085,21 @@ async def _process_meal_analysis(
         window_idx = 0
 
     user_id = str(message.author.id)
-    add_meal(
+    water_from_food = parsed.get("water_ml", 0)
+
+    meal_id = add_meal(
         user_id, day_key, window_idx,
         parsed["kcal"], parsed["protein"], parsed["carbs"], parsed["fat"],
         description, analysis,
+        photo_url=thumbnail_url,
+        water_ml=water_from_food,
     )
-    log.info("Stored meal: %s kcal for user %s on %s (window %d)",
-             parsed["kcal"], user_id, day_key, window_idx)
+    log.info("Stored meal #%s: %s kcal for user %s on %s (window %d, water=%dml)",
+             meal_id, parsed["kcal"], user_id, day_key, window_idx, water_from_food)
+
+    # Auto-log food water content
+    if water_from_food > 0:
+        add_water(user_id, water_from_food, source="food")
 
     # Nutrition breakdown in private channel
     embed = discord.Embed(
@@ -1861,6 +2122,20 @@ async def _process_meal_analysis(
         timestamp=dt,
     )
     await message.channel.send(embed=budget_embed)
+
+    # Water prompt after meal
+    day_water = get_day_water(user_id, day_key)
+    water_line = f"💧 **Water check!** "
+    if water_from_food > 0:
+        water_line += f"~{water_from_food}ml water from this meal auto-logged. "
+    water_line += f"Today: **{day_water}ml** / {DAILY_WATER_TARGET_ML}ml"
+    remaining_water = DAILY_WATER_TARGET_ML - day_water
+    if remaining_water > 0:
+        water_line += f" — {remaining_water}ml to go!"
+        water_line += f"\n*Did you drink water with this meal? Log it: `!water 250`*"
+    else:
+        water_line += " ✅ Target reached!"
+    await message.channel.send(water_line)
 
     # Post to group channel
     group_channel = bot.get_channel(GROUP_CHANNEL_ID)
@@ -2454,11 +2729,14 @@ INFO_PAGES = [
             "`!join` — Create your private channel\n"
             "`!target 2000` — Set daily calorie goal\n"
             "`!macros protein=150` — Set macro targets\n"
-            "`!budget` — Remaining kcal + macros for today\n"
+            "`!weight 82.5` — Log weight (kg)\n"
+            "`!water 250` — Log water (ml)\n"
+            "`!budget` — Remaining kcal + macros + water\n"
             "`!today` — See all meals logged today\n"
             "`!streak` — View your target streak\n"
             "`!weekly` — Weekly summary report\n"
             "`!monthly` — Monthly summary report\n"
+            "`!history` — View day's meals + photo GIF\n"
             "`!undo` — Remove last meal\n"
             "`!delete 2` — Delete a specific meal\n"
             "`!edit 2 kcal=400` — Manually fix values\n"
@@ -2717,6 +2995,156 @@ async def cmd_streak(ctx: commands.Context):
         await ctx.reply(f"{badge} **{streak}-day streak!** {msg}")
 
 
+@bot.command(name="weight")
+async def cmd_weight(ctx: commands.Context, kg: float = None):
+    """Log your weight or view history. Usage: !weight 82.5"""
+    user_id = str(ctx.author.id)
+
+    if kg is None:
+        history = get_weight_history(user_id, limit=14)
+        if not history:
+            await ctx.reply("⚖️ No weight logged yet. Use `!weight 82.5` to start tracking.")
+            return
+        lines = ["**⚖️ Weight History** (last 14 entries)\n"]
+        for i, entry in enumerate(history):
+            marker = " ◀️" if i == 0 else ""
+            if i > 0:
+                diff = entry["weight_kg"] - history[i-1]["weight_kg"]
+                sign = "+" if diff > 0 else ""
+                trend = f" ({sign}{diff:.1f})"
+            else:
+                trend = ""
+            lines.append(f"  {entry['day_key']}: **{entry['weight_kg']:.1f} kg**{trend}{marker}")
+
+        # Overall change
+        if len(history) >= 2:
+            change = history[0]["weight_kg"] - history[-1]["weight_kg"]
+            period_days = len(history)
+            sign = "+" if change > 0 else ""
+            lines.append(f"\n📈 Change over last {period_days} entries: **{sign}{change:.1f} kg**")
+
+        await ctx.reply("\n".join(lines))
+        return
+
+    if kg < 20 or kg > 300:
+        await ctx.reply("Please enter a weight between 20 and 300 kg.")
+        return
+
+    is_new = log_weight(user_id, kg)
+    history = get_weight_history(user_id, limit=2)
+
+    response = f"✅ Weight logged: **{kg:.1f} kg**"
+    if len(history) >= 2:
+        diff = kg - history[1]["weight_kg"]
+        if diff < 0:
+            response += f" — down **{abs(diff):.1f} kg** since last weigh-in! 📉"
+        elif diff > 0:
+            response += f" — up **{diff:.1f} kg** since last weigh-in 📈"
+        else:
+            response += " — same as last time ⚖️"
+    if not is_new:
+        response += "\n*(Updated today's entry)*"
+
+    await ctx.reply(response)
+
+
+@bot.command(name="water")
+async def cmd_water(ctx: commands.Context, amount: int = None):
+    """Log water intake or view today's total. Usage: !water 250 (in ml)"""
+    user_id = str(ctx.author.id)
+    dt = now_tz()
+    day_key = get_food_day(dt)
+
+    if amount is None:
+        total = get_day_water(user_id, day_key)
+        pct = min(100, int(total / DAILY_WATER_TARGET_ML * 100))
+        bar_full = pct // 10
+        bar_empty = 10 - bar_full
+        bar = "🟦" * bar_full + "⬜" * bar_empty
+        lines = [
+            f"💧 **Water Today**: **{total}ml** / {DAILY_WATER_TARGET_ML}ml ({pct}%)",
+            bar,
+        ]
+        remaining = DAILY_WATER_TARGET_ML - total
+        if remaining > 0:
+            lines.append(f"Still need **{remaining}ml** — that's about {remaining // 250} glasses!")
+        else:
+            lines.append("✅ Daily target reached! Great hydration!")
+        lines.append(f"\nLog water: `!water 250` (ml)")
+        await ctx.reply("\n".join(lines))
+        return
+
+    if amount < 1 or amount > 5000:
+        await ctx.reply("Please enter an amount between 1 and 5000 ml.")
+        return
+
+    total = add_water(user_id, amount, source="manual")
+    pct = min(100, int(total / DAILY_WATER_TARGET_ML * 100))
+    bar_full = pct // 10
+    bar_empty = 10 - bar_full
+    bar = "🟦" * bar_full + "⬜" * bar_empty
+
+    response = f"💧 +**{amount}ml** logged! Today: **{total}ml** / {DAILY_WATER_TARGET_ML}ml ({pct}%)\n{bar}"
+    remaining = DAILY_WATER_TARGET_ML - total
+    if remaining <= 0:
+        response += "\n✅ Daily water target reached!"
+    elif remaining <= 500:
+        response += f"\nAlmost there — just **{remaining}ml** to go!"
+
+    await ctx.reply(response)
+
+
+@bot.command(name="history")
+async def cmd_history(ctx: commands.Context, date: str = None):
+    """View a day's meal photo GIF. Usage: !history or !history 2026-03-16"""
+    user_id = str(ctx.author.id)
+    dt = now_tz()
+
+    if date is None:
+        # Default to yesterday (today is still in progress)
+        day_dt = datetime.strptime(get_food_day(dt), "%Y-%m-%d") - timedelta(days=1)
+        date = day_dt.strftime("%Y-%m-%d")
+    else:
+        # Validate date format
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            await ctx.reply("Invalid date format. Use: `!history 2026-03-16`")
+            return
+
+    meals = get_day_meals(user_id, date)
+    if not meals:
+        await ctx.reply(f"No meals logged on {date}.")
+        return
+
+    # Show meal list
+    totals = get_day_totals(user_id, date)
+    lines = [f"**📋 Meals on {date}** ({len(meals)} meals, {totals['total_kcal']} kcal)\n"]
+    for i, m in enumerate(meals, 1):
+        w = MEAL_WINDOWS[m["window_idx"]]
+        ts = datetime.fromisoformat(m["timestamp"]).strftime("%H:%M")
+        photo = "📸" if m.get("photo_url") else "✍️"
+        lines.append(f"  {photo} {w[3]} {ts} — {m['kcal']} kcal ({m['protein_g']:.0f}P/{m['carbs_g']:.0f}C/{m['fat_g']:.0f}F)")
+
+    lines.append(f"\n**Total**: {totals['total_kcal']} kcal | {totals['total_protein']:.0f}P / {totals['total_carbs']:.0f}C / {totals['total_fat']:.0f}F")
+
+    # Try to build and send GIF
+    async with ctx.typing():
+        gif_buf = await build_day_gif(user_id, date)
+
+    if gif_buf:
+        gif_file = discord.File(gif_buf, filename=f"meals-{date}.gif")
+        embed = discord.Embed(
+            description="\n".join(lines),
+            color=discord.Color.green(),
+            timestamp=dt,
+        )
+        embed.set_image(url=f"attachment://meals-{date}.gif")
+        await ctx.reply(embed=embed, file=gif_file)
+    else:
+        await ctx.reply("\n".join(lines))
+
+
 # ---------------------------------------------------------------------------
 # Weekly & Monthly summary reports
 # ---------------------------------------------------------------------------
@@ -2805,6 +3233,21 @@ def build_weekly_report(user_id: str, end_date: str | None = None) -> discord.Em
             f"\n⚠️ **Hormonal health warning:** Your fat intake was below 50g on **{low_fat_days} days** this week. "
             f"For optimal hormonal health, keep fat intake above 50g daily. Adjust with `!macros fat=50`."
         )
+
+    # Weight trend
+    weights = get_weight_for_period(user_id, start, end)
+    if weights:
+        lines.append("")
+        first_w = weights[0]["weight_kg"]
+        last_w = weights[-1]["weight_kg"]
+        w_change = last_w - first_w
+        w_sign = "+" if w_change > 0 else ""
+        lines.append(f"**⚖️ Weight**: {first_w:.1f} → {last_w:.1f} kg (**{w_sign}{w_change:.1f} kg**)")
+
+    # Water
+    water_data = get_period_water(user_id, start, end)
+    if water_data["total_ml"] > 0:
+        lines.append(f"💧 **Water avg**: {water_data['daily_avg']:.0f}ml/day ({water_data['days_logged']} days tracked)")
 
     # Day-by-day breakdown
     lines.append("\n**📋 Day-by-Day**")
@@ -2912,6 +3355,20 @@ def build_monthly_report(user_id: str, year: int = None, month: int = None) -> d
             f"\n⚠️ **Hormonal health warning:** Your fat intake was below 50g on **{low_fat_days} days** this month. "
             f"For optimal hormonal health, keep fat intake above 50g daily."
         )
+
+    # Weight trend
+    weights = get_weight_for_period(user_id, start, end)
+    if len(weights) >= 2:
+        first_w = weights[0]["weight_kg"]
+        last_w = weights[-1]["weight_kg"]
+        w_change = last_w - first_w
+        w_sign = "+" if w_change > 0 else ""
+        lines.append(f"\n**⚖️ Weight**: {first_w:.1f} → {last_w:.1f} kg (**{w_sign}{w_change:.1f} kg** this month)")
+
+    # Water
+    water_data = get_period_water(user_id, start, end)
+    if water_data["total_ml"] > 0:
+        lines.append(f"💧 **Water avg**: {water_data['daily_avg']:.0f}ml/day ({water_data['days_logged']} days tracked)")
 
     # Weekly breakdown
     lines.append("\n**📋 Week-by-Week**")
