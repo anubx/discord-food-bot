@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 import requests as http_requests
 import discord
+from discord import app_commands
 from discord.ext import commands
 import anthropic
 from openai import OpenAI
@@ -2068,6 +2069,13 @@ async def on_ready():
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
     init_db()
 
+    try:
+        synced = await bot.tree.sync()
+        log.info("Synced %d slash commands", len(synced))
+    except Exception as e:
+        log.warning("Failed to sync slash commands: %s", e)
+
+
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
     # Meal reminders to private channels
@@ -3911,31 +3919,7 @@ async def cmd_monthly(ctx: commands.Context):
         await ctx.reply("No meals logged this month yet.")
 
 
-# ---------------------------------------------------------------------------
-# HTTP health server for Railway
-# ---------------------------------------------------------------------------
-class _Health(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"ok")
-    def log_message(self, *args):
-        pass
 
-def _start_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), _Health)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    log.info("Health server listening on port %s", port)
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    _start_health_server()
-    bot.run(DISCORD_BOT_TOKEN)
 @bot.command(name="bodyfat")
 async def cmd_bodyfat(ctx: commands.Context, subcommand: str = None, *args):
     """Body fat tracking using Navy method. Usage: !bodyfat setup | !bodyfat confirm | !bodyfat male 180 85 38 | !bodyfat female 165 75 34 100 | !bodyfat delete"""
@@ -4189,39 +4173,862 @@ def export_meals_csv(user_id: str, start_date: str = None, end_date: str = None)
     return output
 
 
-@bot.command(name="timezone")
-async def cmd_timezone(ctx, *, tz_str: str = None):
-    """Set or view your timezone. Usage: !timezone Europe/Berlin"""
-    user_id = str(ctx.author.id)
-    if tz_str is None:
-        current = get_user_timezone(user_id)
-        user_now = datetime.now(ZoneInfo(current))
-        await ctx.reply(f"🕐 Your timezone: **{current}**\nYour current time: **{user_now.strftime('%H:%M')}**\nChange: `!timezone America/New_York`")
+
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Slash Commands (mirror of prefix commands)
+# ---------------------------------------------------------------------------
+
+@bot.tree.command(name="join", description="Join FoodTracker and set your calorie target")
+@app_commands.describe(kcal="Daily calorie target in kcal")
+async def slash_join(interaction: discord.Interaction, kcal: int = None):
+    """Join FoodTracker and set your calorie target"""
+    user_id = str(interaction.user.id)
+    existing = get_target_kcal(user_id)
+    
+    if existing and kcal is None:
+        await interaction.response.send_message(f"You've already joined! Your target is **{existing} kcal/day**. Change it with `/target <kcal>`.")
         return
-    # Validate timezone
+    
+    if kcal is None:
+        await interaction.response.send_message("Please specify a calorie target: `/join 2000` (recommended: 1800–2500 depending on your goals)")
+        return
+    
+    if kcal < 800 or kcal > 5000:
+        await interaction.response.send_message("⚠️ That seems extreme. Use a reasonable range: 800–5000 kcal.")
+        return
+    
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO user_settings (user_id, target_kcal, display_name) VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET target_kcal = ?, display_name = ?",
+        (user_id, kcal, interaction.user.display_name, kcal, interaction.user.display_name),
+    )
+    conn.commit()
+    conn.close()
+    log.info("User %s set calorie target to %d", user_id, kcal)
+    await interaction.response.send_message(
+        f"✅ Daily calorie target set to **{kcal} kcal**.\n"
+        f"💡 Now set your protein goal: `/macros protein=150`"
+    )
+
+
+@bot.tree.command(name="target", description="Set your daily calorie target")
+@app_commands.describe(kcal="Daily calorie target in kcal")
+async def slash_target(interaction: discord.Interaction, kcal: int = None):
+    """Set your daily calorie target"""
+    user_id = str(interaction.user.id)
+    
+    if kcal is None:
+        current = get_target_kcal(user_id)
+        if current:
+            await interaction.response.send_message(f"Your current target: **{current} kcal/day**")
+        else:
+            await interaction.response.send_message("No target set. Use `/target 2000` to set one.")
+        return
+    
+    if kcal < 800 or kcal > 5000:
+        await interaction.response.send_message("⚠️ That seems extreme. Use a reasonable range: 800–5000 kcal.")
+        return
+    
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO user_settings (user_id, target_kcal) VALUES (?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET target_kcal = ?",
+        (user_id, kcal, kcal),
+    )
+    conn.commit()
+    conn.close()
+    await interaction.response.send_message(
+        f"✅ Daily calorie target set to **{kcal} kcal**.\n"
+        f"💡 Now set your protein goal: `/macros protein=150`"
+    )
+
+
+@bot.tree.command(name="budget", description="View your remaining calorie budget")
+async def slash_budget(interaction: discord.Interaction):
+    """View your remaining calorie budget for today"""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    budget_text = build_budget_text(user_id, day_key, dt)
+    embed = discord.Embed(
+        title="🎯  Daily Budget",
+        description=budget_text,
+        color=discord.Color.gold(),
+        timestamp=dt,
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="today", description="Show a summary of everything you've eaten today")
+async def slash_today(interaction: discord.Interaction):
+    """Show a summary of everything you've eaten today"""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    meals = get_day_meals(user_id, day_key)
+    totals = get_day_totals(user_id, day_key)
+    target = get_target_kcal(user_id)
+
+    if not meals:
+        await interaction.response.send_message("No meals logged today yet. Post a food photo to get started!")
+        return
+
+    lines = [f"**📋 Today's meals ({day_key})**\n"]
+    for m in meals:
+        window = MEAL_WINDOWS[m["window_idx"]]
+        ts = datetime.fromisoformat(m["timestamp"]).strftime("%H:%M")
+        lines.append(f"{window[3]} {ts} — {m['kcal']} kcal ({m['protein_g']:.0f}P / {m['carbs_g']:.0f}C / {m['fat_g']:.0f}F)")
+
+    lines.append(f"\n**Total**: {totals['total_kcal']} kcal | {totals['total_protein']:.0f}g P / {totals['total_carbs']:.0f}g C / {totals['total_fat']:.0f}g F")
+    if target:
+        remaining = target - totals["total_kcal"]
+        if remaining > 0:
+            lines.append(f"**Remaining**: {remaining} kcal of {target} kcal target")
+        else:
+            lines.append(f"**Over target**: {abs(remaining)} kcal over {target} kcal target")
+
+    embed = discord.Embed(
+        title="🍽️  Today's Log",
+        description="\n".join(lines),
+        color=discord.Color.green(),
+        timestamp=dt,
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="leaderboard", description="Show today's group rankings")
+async def slash_leaderboard(interaction: discord.Interaction):
+    """Show today's group rankings"""
+    dt = now_user(str(interaction.user.id))
+    day_key = get_food_day(dt)
+    text = build_leaderboard(day_key)
+    embed = discord.Embed(
+        title="🏆  Today's Leaderboard",
+        description=text,
+        color=discord.Color.gold(),
+        timestamp=dt,
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="undo", description="Remove your last logged meal for today")
+async def slash_undo(interaction: discord.Interaction):
+    """Remove your last logged meal for today"""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    deleted = delete_last_meal(user_id, day_key)
+    if deleted:
+        w = MEAL_WINDOWS[deleted["window_idx"]]
+        ts = datetime.fromisoformat(deleted["timestamp"]).strftime("%H:%M")
+        await interaction.response.send_message(
+            f"🗑️ Removed last meal: **{deleted['kcal']} kcal** ({deleted['protein_g']:.0f}P / {deleted['carbs_g']:.0f}C / {deleted['fat_g']:.0f}F) logged at {ts}."
+        )
+    else:
+        await interaction.response.send_message("No meals to undo today.")
+
+
+@bot.tree.command(name="delete", description="Delete a specific meal by its number from /today")
+@app_commands.describe(meal_num="Meal number to delete (from /today)")
+async def slash_delete(interaction: discord.Interaction, meal_num: int = None):
+    """Delete a specific meal by its number"""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    meals = get_day_meals(user_id, day_key)
+
+    if not meals:
+        await interaction.response.send_message("No meals logged today.")
+        return
+
+    if meal_num is None:
+        lines = ["Which meal do you want to delete? Use `/delete <number>`\n"]
+        for i, m in enumerate(meals, 1):
+            w = MEAL_WINDOWS[m["window_idx"]]
+            ts = datetime.fromisoformat(m["timestamp"]).strftime("%H:%M")
+            lines.append(f"**{i}.** {w[3]} {ts} — {m['kcal']} kcal ({m['protein_g']:.0f}P / {m['carbs_g']:.0f}C / {m['fat_g']:.0f}F)")
+        await interaction.response.send_message("\n".join(lines))
+        return
+
+    if meal_num < 1 or meal_num > len(meals):
+        await interaction.response.send_message(f"Invalid meal number. Use a number between 1 and {len(meals)}.")
+        return
+
+    meal = meals[meal_num - 1]
+    deleted = delete_meal(meal["id"], user_id)
+    if deleted:
+        ts = datetime.fromisoformat(meal["timestamp"]).strftime("%H:%M")
+        await interaction.response.send_message(f"🗑️ Deleted meal #{meal_num}: **{meal['kcal']} kcal** logged at {ts}.")
+    else:
+        await interaction.response.send_message("Couldn't delete that meal.")
+
+
+@bot.tree.command(name="edit", description="Edit a meal's macros")
+@app_commands.describe(meal_num="Meal number to edit", values="Macro values (e.g., 'protein=150 carbs=200')")
+async def slash_edit(interaction: discord.Interaction, meal_num: int, values: str):
+    """Edit a meal's macros"""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    meals = get_day_meals(user_id, day_key)
+
+    if not meals:
+        await interaction.response.send_message("No meals logged today.")
+        return
+
+    if meal_num < 1 or meal_num > len(meals):
+        await interaction.response.send_message(f"Invalid meal number. Use a number between 1 and {len(meals)}.")
+        return
+
+    meal = meals[meal_num - 1]
+    try:
+        updated = update_meal_macros(meal["id"], user_id, values)
+        if updated:
+            await interaction.response.send_message(
+                f"✅ Edited meal #{meal_num}:\n"
+                f"🔥 Calories: **{updated['kcal']} kcal**\n"
+                f"🧬 Protein: **{updated['protein']}g** ({updated['protein'] * 4} kcal)\n"
+                f"🧈 Fat: **{updated['fat']}g** ({updated['fat'] * 9} kcal)\n"
+                f"🍞 Carbs: **{updated['carbs']}g** ({updated['carbs'] * 4} kcal) — auto-calculated\n"
+                f"🎯 Total: **{updated['kcal']} kcal**"
+            )
+        else:
+            await interaction.response.send_message("Couldn't update that meal.")
+    except Exception as e:
+        await interaction.response.send_message(f"⚠️ Error parsing macros: {e}\nUse format: `protein=150 fat=50`")
+
+
+@bot.tree.command(name="schedule", description="View your meal windows and reminder schedule")
+async def slash_schedule(interaction: discord.Interaction):
+    """View your meal windows and reminder schedule"""
+    lines = ["**🍽️  Meal Schedule**\n"]
+    for start, end, label, emoji in MEAL_WINDOWS:
+        if end > start:
+            lines.append(f"{emoji} {start:02d}:00 – {end:02d}:00 — {label}")
+        else:
+            lines.append(f"{emoji} {start:02d}:00 – {end:02d}:00 (next day) — {label}")
+    lines.append(f"\nReminders sent at the start of each window.\nYour timezone: {get_user_timezone(str(interaction.user.id))}")
+    embed = discord.Embed(
+        title="📅 Your Meal Schedule",
+        description="\n".join(lines),
+        color=discord.Color.blurple(),
+        timestamp=now_user(str(interaction.user.id)),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="ping", description="Check bot latency")
+async def slash_ping(interaction: discord.Interaction):
+    """Check bot latency"""
+    await interaction.response.send_message(f"Pong! {round(interaction.client.latency * 1000)}ms")
+
+
+@bot.tree.command(name="commands", description="Show all available commands")
+async def slash_commands(interaction: discord.Interaction):
+    """Show all available commands"""
+    user_id = str(interaction.user.id)
+    lang = get_user_language(user_id)
+    
+    lines = [
+        "**FoodTracker Commands**\n",
+        "**Meal Logging** (DMs only)\n"
+        "📸 Send a food photo\n"
+        "🎤 Send a voice message\n"
+        "📝 Text commands: `!log 500 kcal, 30g protein`\n\n",
+        
+        "**Viewing & Analytics**\n"
+        "/today — meals logged today\n"
+        "/budget — remaining calories\n"
+        "/leaderboard — group rankings\n"
+        "/weekly — last 7 days\n"
+        "/monthly — current month\n"
+        "/history [date] — view meals & GIF\n\n",
+        
+        "**Settings**\n"
+        "/target [kcal] — set calorie goal\n"
+        "/macros [values] — protein/carb/fat targets\n"
+        "/weight [kg] — log weight\n"
+        "/water [ml] — log water\n"
+        "/timezone [tz] — set timezone\n"
+        "/language [lang] — change language (en, de)\n"
+        "/bodyfat [subcommand] — body fat tracking\n\n",
+        
+        "**Account**\n"
+        "/pro — upgrade to Pro\n"
+        "/trial — start 7-day trial\n"
+        "/export [period] — export data (week, month, all)\n"
+        "/deletedata [confirm] — delete all data\n"
+        "/undo — remove last meal\n"
+        "/delete [meal_num] — delete specific meal\n"
+        "/edit [meal_num] [values] — edit meal\n\n",
+        
+        "**Info**\n"
+        "/info — about FoodTracker\n"
+        "/ping — bot latency\n",
+    ]
+    
+    await interaction.response.send_message("".join(lines))
+
+
+@bot.tree.command(name="info", description="About FoodTracker")
+async def slash_info(interaction: discord.Interaction):
+    """About FoodTracker"""
+    embed = discord.Embed(
+        title="ℹ️  FoodTracker",
+        description=(
+            "Your DM-based food & macro tracker.\n\n"
+            "📸 **Log with photos** — AI analyzes macros & calories\n"
+            "🎤 **Voice tracking** — just describe what you ate\n"
+            "📊 **Group leaderboard** — stay motivated\n"
+            "🔐 **Privacy-first** — data never leaves Discord DMs\n\n"
+            "**Get started:** Send me a food photo in this DM!\n"
+            "**All commands:** `/commands`"
+        ),
+        color=discord.Color.green(),
+        timestamp=now_tz(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="pro", description="Upgrade to FoodTracker Pro")
+async def slash_pro(interaction: discord.Interaction):
+    """Upgrade to FoodTracker Pro"""
+    user_id = str(interaction.user.id)
+    is_pro = is_premium(user_id)
+    
+    if is_pro:
+        await interaction.response.send_message("You're already a **FoodTracker Pro** member! 🎉")
+        return
+    
+    embed = discord.Embed(
+        title="⭐ FoodTracker Pro",
+        description=(
+            f"**{PREMIUM_MONTHLY_CAP} interactions/month** vs. {FREE_DAILY_CAP}/day\n\n"
+            "✅ Unlimited photos\n"
+            "✅ Unlimited voice\n"
+            "✅ Priority support\n"
+            "✅ Barcode scanning\n"
+            "✅ Corrections & edits\n\n"
+            "**Subscribe now** to unlock everything!"
+        ),
+        color=discord.Color.gold(),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="trial", description="Start your 7-day FoodTracker Pro trial")
+async def slash_trial(interaction: discord.Interaction):
+    """Start your 7-day Pro trial"""
+    user_id = str(interaction.user.id)
+    trial_end = get_trial_end(user_id)
+    is_pro = is_premium(user_id)
+    
+    if is_pro:
+        await interaction.response.send_message("You're already **FoodTracker Pro**! 🎉")
+        return
+    
+    if trial_end:
+        await interaction.response.send_message(f"You already used your trial. It ended on {trial_end}.\n\nUpgrade to Pro: `/pro`")
+        return
+    
+    set_trial_end(user_id, (now_tz() + timedelta(days=7)).strftime("%Y-%m-%d"))
+    await interaction.response.send_message(
+        f"🎉 **7-day trial activated!**\n\n"
+        f"You now have **{PREMIUM_MONTHLY_CAP} interactions** (photos, voice, barcodes) for 7 days.\n\n"
+        f"After the trial, you'll be back to {FREE_DAILY_CAP}/day unless you subscribe. "
+        f"Upgrade with `/pro`"
+    )
+
+
+@bot.tree.command(name="macros", description="Set or view your macro targets")
+@app_commands.describe(values="Macro values (e.g., 'protein=150 carbs=200 fat=50')")
+async def slash_macros(interaction: discord.Interaction, values: str = None):
+    """Set or view your macro targets"""
+    user_id = str(interaction.user.id)
+    
+    if values is None:
+        macros = get_macro_targets(user_id)
+        if macros:
+            await interaction.response.send_message(
+                f"**Your macro targets:**\n"
+                f"🧬 Protein: **{macros['protein']}g/day** ({macros['protein'] * 4} kcal)\n"
+                f"🧈 Fat: **{macros['fat']}g/day** ({macros['fat'] * 9} kcal)\n"
+                f"🍞 Carbs: **{macros['carbs']}g/day** ({macros['carbs'] * 4} kcal)\n"
+                f"🔥 Total: **{macros['kcal']} kcal/day**"
+            )
+        else:
+            await interaction.response.send_message("No macro targets set. Use `/macros protein=150 carbs=200 fat=50`")
+        return
+    
+    try:
+        updated = update_macro_targets(user_id, values)
+        if updated:
+            await interaction.response.send_message(
+                f"✅ Macro targets set:\n"
+                f"🧬 Protein: **{updated['protein']}g/day** ({updated['protein'] * 4} kcal)\n"
+                f"🧈 Fat: **{updated['fat']}g/day** ({updated['fat'] * 9} kcal)\n"
+                f"🍞 Carbs: **{updated['carbs']}g/day** ({updated['carbs'] * 4} kcal)\n"
+                f"🔥 Total: **{updated['kcal']} kcal/day**"
+            )
+        else:
+            await interaction.response.send_message(f"✅ Fat target set to **{updated['fat']}g**. Set protein with `/macros protein=150`.")
+    except Exception as e:
+        await interaction.response.send_message(f"⚠️ Error: {e}\nUse format: `/macros protein=150 carbs=200 fat=50`")
+
+
+@bot.tree.command(name="streak", description="Show your current streak of days hitting your calorie target")
+async def slash_streak(interaction: discord.Interaction):
+    """Show your current streak of days hitting your calorie target"""
+    user_id = str(interaction.user.id)
+    streak = get_streak(user_id)
+
+    if streak == 0:
+        msg = "🔥 No active streak yet. Log meals and stay within your calorie target to start building one!"
+    elif streak == 1:
+        msg = "🔥 **1 day** streak! You hit your target yesterday. Keep it going today!"
+    else:
+        if streak >= 30:
+            badge = "🏆💎"
+            msg = "Incredible discipline!"
+        elif streak >= 14:
+            badge = "🏆🔥"
+            msg = "Two weeks strong!"
+        elif streak >= 7:
+            badge = "⭐🔥"
+            msg = "One full week!"
+        elif streak >= 3:
+            badge = "🔥"
+            msg = "Building momentum!"
+        else:
+            badge = "🔥"
+            msg = "Keep going!"
+        msg = f"{badge} **{streak}-day streak!** {msg}"
+    
+    await interaction.response.send_message(msg)
+
+
+@bot.tree.command(name="weight", description="Log or view your weight")
+@app_commands.describe(kg="Weight in kilograms")
+async def slash_weight(interaction: discord.Interaction, kg: float = None):
+    """Log or view your weight"""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    
+    if kg is None:
+        last_weight = get_last_weight(user_id)
+        if last_weight:
+            await interaction.response.send_message(
+                f"Your last weight: **{last_weight['weight']} kg** on {last_weight['day_key']}"
+            )
+        else:
+            await interaction.response.send_message("No weight logged yet. Use `/weight 75` to log one.")
+        return
+    
+    if kg < 30 or kg > 300:
+        await interaction.response.send_message("⚠️ Weight seems unrealistic. Try again with a reasonable value (30–300 kg).")
+        return
+    
+    day_key = get_food_day(dt)
+    log_weight(user_id, kg, day_key)
+    await interaction.response.send_message(f"✅ Weight logged: **{kg} kg**")
+
+
+@bot.tree.command(name="water", description="Log water intake")
+@app_commands.describe(amount="Amount of water in milliliters")
+async def slash_water(interaction: discord.Interaction, amount: int = None):
+    """Log water intake"""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    
+    if amount is None:
+        water_today = get_day_water(user_id, day_key)
+        target = 3000
+        remaining = max(0, target - water_today)
+        response = f"**💧 Water intake**\nToday: **{water_today}ml** / {target}ml\n"
+        if remaining <= 0:
+            response += "\n✅ Daily water target reached!"
+        elif remaining <= 500:
+            response += f"\nAlmost there — just **{remaining}ml** to go!"
+        await interaction.response.send_message(response)
+        return
+    
+    if amount < 0 or amount > 5000:
+        await interaction.response.send_message("⚠️ That doesn't seem right. Log between 0–5000 ml.")
+        return
+    
+    log_water(user_id, amount, day_key, dt)
+    water_today = get_day_water(user_id, day_key)
+    target = 3000
+    remaining = max(0, target - water_today)
+    response = f"✅ Logged **{amount}ml** of water\n\n**💧 Water intake**\nToday: **{water_today}ml** / {target}ml\n"
+    if remaining <= 0:
+        response += "✅ Daily water target reached!"
+    elif remaining <= 500:
+        response += f"Almost there — just **{remaining}ml** to go!"
+    await interaction.response.send_message(response)
+
+
+@bot.tree.command(name="history", description="View a day's meals with photo GIF")
+@app_commands.describe(date="Date in YYYY-MM-DD format (default: yesterday)")
+async def slash_history(interaction: discord.Interaction, date: str = None):
+    """View a day's meals with photo GIF"""
+    await interaction.response.defer()
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+
+    if date is None:
+        day_dt = datetime.strptime(get_food_day(dt), "%Y-%m-%d") - timedelta(days=1)
+        date = day_dt.strftime("%Y-%m-%d")
+    else:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            await interaction.followup.send("Invalid date format. Use: `2026-03-16`")
+            return
+
+    meals = get_day_meals(user_id, date)
+    if not meals:
+        await interaction.followup.send(f"No meals logged on {date}.")
+        return
+
+    totals = get_day_totals(user_id, date)
+    lines = [f"**📋 Meals on {date}** ({len(meals)} meals, {totals['total_kcal']} kcal)\n"]
+    for i, m in enumerate(meals, 1):
+        w = MEAL_WINDOWS[m["window_idx"]]
+        ts = datetime.fromisoformat(m["timestamp"]).strftime("%H:%M")
+        photo = "📸" if m.get("photo_url") else "✍️"
+        lines.append(f"  {photo} {w[3]} {ts} — {m['kcal']} kcal ({m['protein_g']:.0f}P/{m['carbs_g']:.0f}C/{m['fat_g']:.0f}F)")
+
+    lines.append(f"\n**Total**: {totals['total_kcal']} kcal | {totals['total_protein']:.0f}P / {totals['total_carbs']:.0f}C / {totals['total_fat']:.0f}F")
+
+    gif_buf = await build_day_gif(user_id, date)
+
+    if gif_buf:
+        gif_file = discord.File(gif_buf, filename=f"meals-{date}.gif")
+        embed = discord.Embed(
+            description="\n".join(lines),
+            color=discord.Color.green(),
+            timestamp=dt,
+        )
+        embed.set_image(url=f"attachment://meals-{date}.gif")
+        await interaction.followup.send(embed=embed, file=gif_file)
+    else:
+        await interaction.followup.send("\n".join(lines))
+
+
+@bot.tree.command(name="weekly", description="View your weekly report (last 7 days)")
+async def slash_weekly(interaction: discord.Interaction):
+    """View your weekly report"""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    
+    embed = build_weekly_report(user_id)
+    if embed:
+        embed.title = "📊  Weekly Report — Last 7 Days"
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message("No meals logged this week yet.")
+
+
+@bot.tree.command(name="monthly", description="View your monthly report (current month)")
+async def slash_monthly(interaction: discord.Interaction):
+    """View your monthly report"""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    
+    year, month = dt.year, dt.month
+    embed = build_monthly_report(user_id, year, month)
+    if embed:
+        embed.title = f"📊  Monthly Report — {dt.strftime('%B %Y')} (so far)"
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message("No meals logged this month yet.")
+
+
+@bot.tree.command(name="bodyfat", description="Body fat tracking using Navy method")
+@app_commands.describe(subcommand="Action (setup, confirm, delete, male, female)", args="Measurements or empty")
+@app_commands.choices(subcommand=[
+    app_commands.Choice(name="Setup (learn about the feature)", value="setup"),
+    app_commands.Choice(name="Confirm consent", value="confirm"),
+    app_commands.Choice(name="Delete all body fat data", value="delete"),
+    app_commands.Choice(name="Log measurement (male)", value="male"),
+    app_commands.Choice(name="Log measurement (female)", value="female"),
+])
+async def slash_bodyfat(interaction: discord.Interaction, subcommand: app_commands.Choice[str], args: str = None):
+    """Body fat tracking using Navy method"""
+    user_id = str(interaction.user.id)
+    subcmd = subcommand.value
+    
+    if subcmd is None:
+        if not get_bodyfat_consent(user_id):
+            await interaction.response.send_message(
+                "You haven't consented to body fat tracking yet.\n"
+                "Use `/bodyfat setup` to learn about the feature and opt-in."
+            )
+            return
+        
+        history = get_bodyfat_history(user_id, limit=30)
+        if not history:
+            await interaction.response.send_message("No body fat entries yet. Log one with: `/bodyfat male 180 85 38`")
+            return
+        
+        lines = ["**📊 Body Fat History (last 30)**\n"]
+        for entry in history:
+            lines.append(f"  {entry['day_key']}: **{entry['bf_pct']}%** ({entry['method']})")
+        
+        embed = discord.Embed(
+            title="💪 Body Fat History",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+            timestamp=now_tz(),
+        )
+        await interaction.response.send_message(embed=embed)
+        return
+    
+    if subcmd == "setup":
+        await interaction.response.send_message(
+            "**Body Fat Tracking (Navy Method)**\n\n"
+            "This uses the US Navy body fat estimation formula (no AI, calculated locally).\n\n"
+            "**What gets stored:**\n"
+            "Only the final body fat percentage (%) is stored.\n"
+            "Your measurement inputs (height, waist, neck, hip) are NOT saved — just the result.\n\n"
+            "**Privacy:**\n"
+            "- Data minimization: only the BF% percentage is kept\n"
+            "- Included in weekly/monthly reports if you consent\n\n"
+            "**Usage:**\n"
+            "`/bodyfat male 180 85 38` — height(cm) waist(cm) neck(cm)\n"
+            "`/bodyfat female 165 75 34 100` — height waist neck hip\n\n"
+            "Type `/bodyfat confirm` to opt-in."
+        )
+        return
+    
+    if subcmd == "confirm":
+        set_bodyfat_consent(user_id, True)
+        await interaction.response.send_message("✅ Body fat tracking enabled. Log your first measurement: `/bodyfat male 180 85 38`")
+        return
+    
+    if subcmd == "delete":
+        set_bodyfat_consent(user_id, False)
+        conn = get_db()
+        conn.execute("DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message("✅ All body fat data deleted and consent revoked.")
+        return
+    
+    if subcmd not in ("male", "female"):
+        await interaction.response.send_message("Invalid gender. Use: `male` or `female`")
+        return
+    
+    if not get_bodyfat_consent(user_id):
+        await interaction.response.send_message("Please use `/bodyfat setup` and then `/bodyfat confirm` to opt-in first.")
+        return
+    
+    try:
+        if args is None or not args.strip():
+            if subcmd == "male":
+                await interaction.response.send_message("Usage: `/bodyfat male 180 85 38` (height_cm waist_cm neck_cm)")
+            else:
+                await interaction.response.send_message("Usage: `/bodyfat female 165 75 34 100` (height waist neck hip)")
+            return
+        
+        measurements = args.split()
+        if subcmd == "male":
+            if len(measurements) < 3:
+                await interaction.response.send_message("Usage: `/bodyfat male 180 85 38` (height_cm waist_cm neck_cm)")
+                return
+            height = float(measurements[0])
+            waist = float(measurements[1])
+            neck = float(measurements[2])
+            bf_pct = navy_body_fat("male", height, waist, neck)
+        else:  # female
+            if len(measurements) < 4:
+                await interaction.response.send_message("Usage: `/bodyfat female 165 75 34 100` (height waist neck hip)")
+                return
+            height = float(measurements[0])
+            waist = float(measurements[1])
+            neck = float(measurements[2])
+            hip = float(measurements[3])
+            bf_pct = navy_body_fat("female", height, waist, neck, hip)
+        
+        if bf_pct < 5 or bf_pct > 60:
+            await interaction.response.send_message(f"⚠️ Result seems off: {bf_pct:.1f}%. Check your measurements and try again.")
+            return
+        
+        log_bodyfat(user_id, bf_pct)
+        await interaction.response.send_message(f"✅ Logged body fat: **{bf_pct}%** (Navy method)")
+    
+    except (ValueError, TypeError):
+        await interaction.response.send_message("Invalid measurements. Use numbers only: `/bodyfat male 180 85 38`")
+    except Exception as e:
+        log.exception("Error in bodyfat command")
+        await interaction.response.send_message(f"⚠️ Error: {e}")
+
+
+@bot.tree.command(name="deletedata", description="Permanently delete all your data")
+@app_commands.describe(confirm="Type 'confirm' to delete all data")
+async def slash_deletedata(interaction: discord.Interaction, confirm: str = None):
+    """Permanently delete all your data"""
+    user_id = str(interaction.user.id)
+    
+    if confirm is None:
+        await interaction.response.send_message(
+            "⚠️ **This will permanently delete ALL your data:**\n"
+            "Meals, weight, water, body fat, settings — everything.\n\n"
+            "**This cannot be undone.**\n\n"
+            "**Type `/deletedata confirm` to proceed.**"
+        )
+        return
+    
+    if confirm.lower() != "confirm":
+        await interaction.response.send_message("⚠️ Type `/deletedata confirm` to permanently delete your data.")
+        return
+    
+    conn = get_db()
+    conn.execute("DELETE FROM meals WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM weight_log WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM water_log WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    log.info("User %s deleted all their data", user_id)
+    await interaction.response.send_message("✅ All your data has been permanently deleted. You can start fresh anytime by messaging me.")
+
+
+@bot.tree.command(name="timezone", description="Set your timezone")
+@app_commands.describe(tz_str="Timezone (e.g., 'Europe/Berlin', 'America/New_York')")
+async def slash_timezone(interaction: discord.Interaction, tz_str: str = None):
+    """Set your timezone"""
+    user_id = str(interaction.user.id)
+    
+    if tz_str is None:
+        current_tz = get_user_timezone(user_id)
+        await interaction.response.send_message(f"Your timezone: **{current_tz}**")
+        return
+    
     try:
         ZoneInfo(tz_str)
     except (KeyError, Exception):
-        await ctx.reply(f"⚠️ Invalid timezone: `{tz_str}`\n\nExamples: `Europe/Berlin`, `America/New_York`, `Asia/Tokyo`, `US/Pacific`\nFull list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones")
+        await interaction.response.send_message(
+            f"⚠️ Invalid timezone: `{tz_str}`\n\n"
+            f"Examples: `Europe/Berlin`, `America/New_York`, `Asia/Tokyo`, `US/Pacific`\n"
+            f"Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
+        )
         return
+    
     set_user_timezone(user_id, tz_str)
     user_now = datetime.now(ZoneInfo(tz_str))
-    await ctx.reply(f"✅ Timezone set to **{tz_str}**\nYour current time: **{user_now.strftime('%H:%M')}**\n\nReminders and meal windows will now use your local time.")
+    await interaction.response.send_message(
+        f"✅ Timezone set to **{tz_str}**\n"
+        f"Your current time: **{user_now.strftime('%H:%M')}**\n\n"
+        f"Reminders and meal windows will now use your local time."
+    )
 
 
-@bot.command(name="language")
-async def cmd_language(ctx, lang: str = None):
-    """Set or view your language. Usage: !language de"""
-    user_id = str(ctx.author.id)
+@bot.tree.command(name="language", description="Set or view your language")
+@app_commands.describe(lang="Language code (en, de)")
+@app_commands.choices(lang=[
+    app_commands.Choice(name="English", value="en"),
+    app_commands.Choice(name="Deutsch", value="de"),
+])
+async def slash_language(interaction: discord.Interaction, lang: app_commands.Choice[str] = None):
+    """Set or view your language"""
+    user_id = str(interaction.user.id)
+    
     if lang is None:
-        await ctx.reply(t(user_id, "language_current"))
+        await interaction.response.send_message(t(user_id, "language_current"))
         return
-    lang = lang.lower().strip()
-    if lang not in TRANSLATIONS:
+    
+    lang_code = lang.value
+    if lang_code not in TRANSLATIONS:
         available = ", ".join("`{}` ({})".format(k, v) for k, v in LANGUAGE_NAMES.items())
-        await ctx.reply(f"⚠️ Unknown language: `{lang}`\nAvailable: {available}")
+        await interaction.response.send_message(f"⚠️ Unknown language: `{lang_code}`\nAvailable: {available}")
         return
-    set_user_language(user_id, lang)
-    await ctx.reply(t(user_id, "language_set"))
+    
+    set_user_language(user_id, lang_code)
+    await interaction.response.send_message(t(user_id, "language_set"))
 
 
+@bot.tree.command(name="export", description="Export your meal data as CSV")
+@app_commands.describe(period="Time period to export")
+@app_commands.choices(period=[
+    app_commands.Choice(name="Last 7 days", value="week"),
+    app_commands.Choice(name="Current month", value="month"),
+    app_commands.Choice(name="All data", value="all"),
+])
+async def slash_export(interaction: discord.Interaction, period: app_commands.Choice[str] = None):
+    """Export your data as CSV"""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    
+    if period is None:
+        await interaction.response.send_message(
+            "📤 **Data Export**\n"
+            "`/export week` — last 7 days (CSV)\n"
+            "`/export month` — current month (CSV)\n"
+            "`/export all` — all data (CSV)\n"
+        )
+        return
+    
+    period_val = period.value
+    if period_val == "week":
+        end_dt = datetime.strptime(day_key, "%Y-%m-%d")
+        start_dt = end_dt - timedelta(days=6)
+        start = start_dt.strftime("%Y-%m-%d")
+        end = day_key
+        filename = f"foodtracker-week-{end}.csv"
+    elif period_val == "month":
+        start = "{:04d}-{:02d}-01".format(dt.year, dt.month)
+        end = day_key
+        filename = f"foodtracker-{dt.year:04d}-{dt.month:02d}.csv"
+    elif period_val == "all":
+        start = None
+        end = None
+        filename = f"foodtracker-all-{day_key}.csv"
+    else:
+        await interaction.response.send_message("Unknown period. Use: `week`, `month`, or `all`")
+        return
+    
+    csv_data = export_meals_csv(user_id, start, end)
+    csv_bytes = csv_data.getvalue().encode("utf-8")
+    
+    if len(csv_bytes) < 10:
+        await interaction.response.send_message("No data to export for that period.")
+        return
+    
+    file = discord.File(io.BytesIO(csv_bytes), filename=filename)
+    lang_text = t(user_id, "export_ready")
+    await interaction.response.send_message(lang_text, file=file)
+
+
+
+# HTTP health server for Railway
+# ---------------------------------------------------------------------------
+class _Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+    def log_message(self, *args):
+        pass
+
+def _start_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), _Health)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log.info("Health server listening on port %s", port)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    _start_health_server()
+    bot.run(DISCORD_BOT_TOKEN)

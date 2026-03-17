@@ -136,6 +136,20 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 - [x] **App icon** (`icon.png`) — 1024x1024 branded icon for Discord Developer Portal
 - [x] **API cost logging** — all 5 endpoints log token counts + exact costs to Railway logs
 
+### Rate Limiting & Security
+- [x] **Per-user rate limit** — 3-second cooldown between interactions (in-memory, prevents spam/abuse)
+- [x] **Daily hard cap** — 100 interactions/day absolute max regardless of tier (prevents API cost spikes)
+- [x] **Two-layer system** — rate limiter (anti-spam) + existing interaction cap (billing) run independently
+
+### Slash Commands (Discord Interactions)
+- [x] **26 slash commands** — mirrors all prefix commands (`/budget`, `/today`, `/target`, `/macros`, etc.)
+- [x] **Auto-sync on startup** — `bot.tree.sync()` registers commands with Discord
+- [x] **Dropdown choices** — `/export`, `/language`, `/bodyfat` use Discord's choice picker for params
+- [x] **Parameter descriptions** — all slash params have `@app_commands.describe()` for autocomplete hints
+- [x] **Deferred responses** — `/history` uses `defer()` for long GIF operations
+- [x] **Prefix commands preserved** — both `!` and `/` work in parallel during transition
+- [x] **Admin commands excluded** — `!setpremium`, `!removepremium`, `!migrate`, `!analyze` stay prefix-only
+
 ### AI Engine Migration (March 2026)
 - [x] **Migrated from 3 APIs → 1** — OpenAI GPT-4o + Whisper + Anthropic Claude → Gemini 2.5 Flash Lite
 - [x] **27x cost reduction** — $0.004/interaction → $0.00015/interaction
@@ -171,6 +185,8 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 | Multi-language | EN + DE only | Primary user base is German-speaking; adding more languages is easy via TRANSLATIONS dict |
 | Timezone | Per-user, stored in DB | Users in different timezones get correct meal windows, reminders, and day boundaries |
 | Data export | CSV via `!export` | GDPR data portability right; users can import into spreadsheets/MyFitnessPal |
+| Rate limiting | 3s cooldown + 100/day hard cap | In-memory; prevents spam and API cost spikes from abuse |
+| Slash commands | 26 `/` commands alongside `!` prefix | Future-proofing for Message Content intent restrictions; autocomplete UX |
 
 ---
 
@@ -180,8 +196,8 @@ These are evaluated but not yet built. Listed in order of when they'll likely be
 
 | Feature | When to Build | Why It Matters |
 |---------|--------------|----------------|
-| **Rate limiting** | Now / soon | Prevents API cost spikes from malicious users or bots. One bad actor sending 50 photos in 10 seconds runs up Gemini costs. Simple in-memory limiter (1 request/5s/user) is cheap insurance |
-| **Slash commands** | When Discord restricts Message Content intent further | Discord is pushing toward `/command` style. Shows autocomplete, parameter hints, appears in command picker. Works without Message Content privileged intent. Run both systems in parallel during transition |
+| ~~**Rate limiting**~~ | ✅ **Done** | 3s per-user cooldown + 100/day absolute cap. In-memory dict, resets on restart. Prevents API cost spikes from spam |
+| ~~**Slash commands**~~ | ✅ **Done** | 26 slash commands mirroring all prefix commands. Both systems run in parallel. Dropdown choices, parameter hints, deferred responses |
 | **PostgreSQL migration** | ~50+ concurrent users | SQLite has single-writer lock. Once meal reminders trigger 50+ users logging simultaneously, you'll see "database is locked" errors. Postgres handles concurrent writes natively. Railway offers managed Postgres as add-on |
 | **Redis caching** | ~200+ users hitting `!budget` at same time | Every `!budget` is 4+ DB queries. Redis caches these at ~1ms vs ~5ms SQLite. Matters when reminder goes out and hundreds check budget at once. Railway offers Redis add-on |
 | **Web dashboard** | Post-traction, premium differentiator | Website for charts, trends, history outside Discord. "MyFitnessPal lite" companion. Major selling point for premium. Significant effort (auth, frontend, API) but natural growth path |
@@ -492,8 +508,8 @@ Expected ~$0.00015/interaction with Gemini 2.5 Flash Lite. Needs live testing to
 - [ ] "Cheat day" mode — relaxed target with no penalty
 
 ### Technical Improvements (see "Technical Roadmap" section above for detailed analysis)
-- [ ] Rate limiting per user to prevent API cost spikes (**priority — cheap insurance**)
-- [ ] Slash commands (Discord interactions) alongside `!` prefix commands
+- [x] ~~Rate limiting~~ — **Done.** 3s cooldown + 100/day hard cap, in-memory
+- [x] ~~Slash commands~~ — **Done.** 26 `/` commands alongside `!` prefix, auto-sync, choices, deferred responses
 - [ ] PostgreSQL migration for better concurrency at scale (~50+ concurrent users)
 - [ ] Redis caching for frequent DB queries (~200+ users)
 - [ ] Dashboard web UI for viewing history/charts outside Discord
