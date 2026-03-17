@@ -2881,9 +2881,15 @@ async def cmd_pro(ctx: commands.Context):
     if is_premium(user_id):
         trial_left = get_trial_days_left(user_id)
         if trial_left is not None:
-            status = f"🎁 You're on a free trial — **{trial_left} days remaining**"
+            status = (
+                f"🎁 You're on a free trial — **{trial_left} days remaining**\n"
+                f"No payment required. After the trial ends you'll return to {FREE_DAILY_CAP} interactions/day."
+            )
         else:
-            status = "✅ You're a **Pro** member! All features unlocked."
+            status = (
+                "✅ You're a **Pro** member! All features unlocked.\n"
+                "To manage or cancel: **Discord Settings → Subscriptions**"
+            )
         allowed, remaining = check_interaction_cap(user_id)
         status += f"\n📊 Interactions this month: {PREMIUM_MONTHLY_CAP - remaining}/{PREMIUM_MONTHLY_CAP}"
         embed = discord.Embed(
