@@ -19,6 +19,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import requests as http_requests
 import discord
 from discord.ext import commands
 import anthropic
@@ -26,6 +27,8 @@ from openai import OpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
+from PIL import Image
+from pyzbar.pyzbar import decode as decode_barcodes
 
 load_dotenv()
 
@@ -286,21 +289,23 @@ def strip_totals_line(analysis: str) -> str:
 
 
 async def analyze_food_image(image_bytes: bytes, media_type: str = "image/jpeg") -> str:
+    """Send a food photo to OpenAI GPT-4o Vision and return the macro breakdown."""
+    if not openai_client:
+        raise ValueError("OpenAI API key not configured. Add OPENAI_API_KEY to env vars.")
+
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    message = claude.messages.create(
-        model="claude-sonnet-4-20250514",
+    response = openai_client.chat.completions.create(
+        model="gpt-4o",
         max_tokens=1024,
-        system=ANALYSIS_SYSTEM_PROMPT,
         messages=[
+            {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": [
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": image_b64,
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{media_type};base64,{image_b64}",
                         },
                     },
                     {
@@ -308,10 +313,10 @@ async def analyze_food_image(image_bytes: bytes, media_type: str = "image/jpeg")
                         "text": "Analyze this meal photo. Estimate macros (protein, carbs, fat) and total calories.",
                     },
                 ],
-            }
+            },
         ],
     )
-    return message.content[0].text
+    return response.choices[0].message.content
 
 
 TEXT_ANALYSIS_SYSTEM_PROMPT = """You are a nutrition analysis assistant. The user will describe what they ate in text. Provide:
@@ -365,6 +370,90 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
         return transcript.text
     finally:
         os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Barcode scanning + Open Food Facts
+# ---------------------------------------------------------------------------
+def try_decode_barcode(image_bytes: bytes) -> str | None:
+    """Try to decode a barcode from an image. Returns barcode string or None."""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        barcodes = decode_barcodes(img)
+        if barcodes:
+            code = barcodes[0].data.decode("utf-8")
+            log.info("Barcode detected: %s", code)
+            return code
+    except Exception as e:
+        log.warning("Barcode decode failed: %s", e)
+    return None
+
+
+def lookup_barcode(barcode: str) -> dict | None:
+    """Look up a product on Open Food Facts by barcode. Returns product info or None."""
+    url = f"https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
+    try:
+        resp = http_requests.get(url, timeout=10)
+        data = resp.json()
+        if data.get("status") != 1:
+            return None
+        product = data.get("product", {})
+        nutriments = product.get("nutriments", {})
+
+        # Get per-serving values if available, otherwise per 100g
+        serving_size = product.get("serving_size", "")
+        has_serving = bool(nutriments.get("energy-kcal_serving"))
+
+        if has_serving:
+            kcal = int(nutriments.get("energy-kcal_serving", 0))
+            protein = float(nutriments.get("proteins_serving", 0))
+            carbs = float(nutriments.get("carbohydrates_serving", 0))
+            fat = float(nutriments.get("fat_serving", 0))
+            portion_note = f"per serving ({serving_size})" if serving_size else "per serving"
+        else:
+            kcal = int(nutriments.get("energy-kcal_100g", 0))
+            protein = float(nutriments.get("proteins_100g", 0))
+            carbs = float(nutriments.get("carbohydrates_100g", 0))
+            fat = float(nutriments.get("fat_100g", 0))
+            portion_note = "per 100g"
+
+        return {
+            "name": product.get("product_name", "Unknown product"),
+            "brand": product.get("brands", ""),
+            "kcal": kcal,
+            "protein": protein,
+            "carbs": carbs,
+            "fat": fat,
+            "portion_note": portion_note,
+            "image_url": product.get("image_url", ""),
+            "barcode": barcode,
+        }
+    except Exception as e:
+        log.warning("Open Food Facts lookup failed for %s: %s", barcode, e)
+        return None
+
+
+def build_barcode_analysis(product: dict) -> str:
+    """Build a display string + $$TOTALS$$ line from a barcode product lookup."""
+    lines = []
+    name = product["name"]
+    brand = product["brand"]
+    if brand:
+        lines.append(f"**{name}** ({brand})")
+    else:
+        lines.append(f"**{name}**")
+
+    lines.append(f"📦 Barcode: `{product['barcode']}`")
+    lines.append(f"📏 Nutrition {product['portion_note']}:\n")
+    lines.append(f"| Nutrient | Amount |")
+    lines.append(f"|----------|--------|")
+    lines.append(f"| Calories | {product['kcal']} kcal |")
+    lines.append(f"| Protein | {product['protein']:.1f}g |")
+    lines.append(f"| Carbs | {product['carbs']:.1f}g |")
+    lines.append(f"| Fat | {product['fat']:.1f}g |")
+    lines.append(f"\n$$TOTALS: kcal={product['kcal']}, protein={int(product['protein'])}, carbs={int(product['carbs'])}, fat={int(product['fat'])}$$")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +538,7 @@ Track your meals, hit your calorie goals, and compete with friends.
 **How it works:**
 Log meals in your private channel using any of these methods:
 📸 **Photo** — snap a pic of your food
+📦 **Barcode** — photograph a product barcode for exact nutrition data
 ✍️ **Text** — type what you ate (e.g. "two eggs and toast")
 🎤 **Voice** — send a voice message describing your meal
 
@@ -783,6 +873,24 @@ async def on_message(message: discord.Message):
                 async with message.channel.typing():
                     try:
                         image_bytes = await attachment.read()
+
+                        # Try barcode first
+                        barcode = try_decode_barcode(image_bytes)
+                        if barcode:
+                            product = lookup_barcode(barcode)
+                            if product:
+                                analysis = build_barcode_analysis(product)
+                                thumb = product.get("image_url") or attachment.url
+                                await _process_meal_analysis(
+                                    message, analysis,
+                                    f"barcode: {barcode} ({product['name']})",
+                                    thumbnail_url=thumb,
+                                )
+                                continue
+                            else:
+                                await message.reply(f"📦 Barcode `{barcode}` detected but not found in Open Food Facts. Analyzing the image instead...")
+
+                        # No barcode (or barcode not found) — use OpenAI Vision
                         ext = attachment.filename.rsplit(".", 1)[-1].lower()
                         media_map = {
                             "png": "image/png", "jpg": "image/jpeg",
