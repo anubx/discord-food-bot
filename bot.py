@@ -3,15 +3,18 @@ Discord Food Tracker Bot
 - Private channels per user for meal photo uploads + personal tracking
 - Group channel with leaderboard, rankings, and daily summaries
 - Claude Vision for food photo macro/kcal analysis
+- Text and voice message meal logging
 - 6 meal windows with 4am day boundary
 """
 
 import os
 import re
+import io
 import base64
 import logging
 import sqlite3
 import threading
+import tempfile
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -19,6 +22,7 @@ from zoneinfo import ZoneInfo
 import discord
 from discord.ext import commands
 import anthropic
+from openai import OpenAI
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
@@ -31,6 +35,7 @@ load_dotenv()
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 GROUP_CHANNEL_ID = int(os.environ["DISCORD_CHANNEL_ID"])  # shared group channel
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Berlin")
 SERVER_ID = int(os.environ.get("DISCORD_SERVER_ID", "0"))
 
@@ -237,9 +242,10 @@ def get_day_totals(user_id: str, day_key: str) -> dict:
     return dict(row)
 
 # ---------------------------------------------------------------------------
-# Claude Vision client
+# AI clients
 # ---------------------------------------------------------------------------
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 ANALYSIS_SYSTEM_PROMPT = """You are a nutrition analysis assistant. When given a photo of food, provide:
 
@@ -306,6 +312,59 @@ async def analyze_food_image(image_bytes: bytes, media_type: str = "image/jpeg")
         ],
     )
     return message.content[0].text
+
+
+TEXT_ANALYSIS_SYSTEM_PROMPT = """You are a nutrition analysis assistant. The user will describe what they ate in text. Provide:
+
+1. **Identified foods** — list every item mentioned
+2. **Estimated macros per item** (protein, carbs, fat in grams)
+3. **Estimated calories per item**
+4. **Meal totals** — sum of protein, carbs, fat, and total kcal
+
+Be concise. Use a clean table format. If the user doesn't specify portion sizes, assume typical serving sizes and state your assumptions.
+
+IMPORTANT: At the very end of your response, include a single line in this exact format:
+$$TOTALS: kcal=NUMBER, protein=NUMBER, carbs=NUMBER, fat=NUMBER$$
+
+This line must contain only integers (no decimals). This is used for automated tracking."""
+
+
+async def analyze_food_text(description: str) -> str:
+    """Send a text description of food to Claude and return the macro breakdown."""
+    message = claude.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        system=TEXT_ANALYSIS_SYSTEM_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": f"I ate: {description}\n\nEstimate macros (protein, carbs, fat) and total calories.",
+            }
+        ],
+    )
+    return message.content[0].text
+
+
+async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
+    """Transcribe audio using OpenAI Whisper API."""
+    if not openai_client:
+        raise ValueError("OpenAI API key not configured. Add OPENAI_API_KEY to env vars for voice message support.")
+
+    # Write to temp file (Whisper API needs a file-like object with a name)
+    suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ".ogg"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+
+    try:
+        with open(tmp_path, "rb") as audio_file:
+            transcript = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+            )
+        return transcript.text
+    finally:
+        os.unlink(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +447,12 @@ WELCOME_TEXT = """**🍽️ Welcome to FoodTracker!**
 Track your meals, hit your calorie goals, and compete with friends.
 
 **How it works:**
-Post a photo of your food in your private channel and the bot will analyze it for macros and calories using AI vision. Your daily budget updates automatically after each meal.
+Log meals in your private channel using any of these methods:
+📸 **Photo** — snap a pic of your food
+✍️ **Text** — type what you ate (e.g. "two eggs and toast")
+🎤 **Voice** — send a voice message describing your meal
+
+The bot analyzes everything for macros and calories automatically.
 
 **Commands:**
 `!join` — Create your private food tracking channel
@@ -399,9 +463,7 @@ Post a photo of your food in your private channel and the bot will analyze it fo
 `!leaderboard` — See today's group rankings
 `!schedule` — View the reminder schedule
 `!commands` — Show this list again
-`!ping` — Health check
-
-**Or just post a food photo** in your private channel and I'll handle the rest!"""
+`!ping` — Health check"""
 
 
 def build_welcome_embed() -> discord.Embed:
@@ -685,20 +747,39 @@ async def on_message(message: discord.Message):
         return
 
     log.info(
-        "Message in #%s (id=%s) from %s | attachments=%s",
+        "Message in #%s (id=%s) from %s | attachments=%s | content_len=%s",
         message.channel.name, message.channel.id, message.author,
-        len(message.attachments),
+        len(message.attachments), len(message.content),
     )
 
     # Check if this is a tracked private channel
     tracked_channels = get_all_tracked_channel_ids()
     is_private_channel = message.channel.id in tracked_channels
 
-    if is_private_channel and message.attachments:
-        for attachment in message.attachments:
-            if any(attachment.filename.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif")):
-                log.info("Food photo received from %s: %s", message.author, attachment.filename)
+    if is_private_channel:
+        # Skip if it looks like a command
+        if message.content.startswith("!"):
+            await bot.process_commands(message)
+            return
 
+        # Determine input type
+        image_attachments = []
+        audio_attachments = []
+        for att in message.attachments:
+            fname = att.filename.lower()
+            if any(fname.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif")):
+                image_attachments.append(att)
+            elif any(fname.endswith(ext) for ext in (".ogg", ".mp3", ".wav", ".m4a", ".mp4", ".webm")):
+                audio_attachments.append(att)
+
+        has_text = bool(message.content.strip())
+        has_images = bool(image_attachments)
+        has_audio = bool(audio_attachments)
+
+        # --- IMAGE INPUT ---
+        if has_images:
+            for attachment in image_attachments:
+                log.info("Food photo from %s: %s", message.author, attachment.filename)
                 async with message.channel.typing():
                     try:
                         image_bytes = await attachment.read()
@@ -710,71 +791,123 @@ async def on_message(message: discord.Message):
                         media_type = media_map.get(ext, "image/jpeg")
 
                         analysis = await analyze_food_image(image_bytes, media_type)
-                        parsed = parse_totals(analysis)
-                        display_text = strip_totals_line(analysis)
-
-                        dt = now_tz()
-                        day_key = get_food_day(dt)
-                        window_idx = get_current_window_idx(dt)
-                        if window_idx < 0:
-                            window_idx = 0
-
-                        user_id = str(message.author.id)
-                        add_meal(
-                            user_id, day_key, window_idx,
-                            parsed["kcal"], parsed["protein"], parsed["carbs"], parsed["fat"],
-                            attachment.filename, analysis,
+                        await _process_meal_analysis(
+                            message, analysis, attachment.filename,
+                            thumbnail_url=attachment.url,
                         )
-                        log.info("Stored meal: %s kcal for user %s on %s (window %d)",
-                                 parsed["kcal"], user_id, day_key, window_idx)
-
-                        # Nutrition breakdown in private channel
-                        embed = discord.Embed(
-                            title="📊  Nutrition Breakdown",
-                            description=display_text,
-                            color=discord.Color.blue(),
-                            timestamp=dt,
-                        )
-                        embed.set_thumbnail(url=attachment.url)
-                        embed.set_footer(text=f"Analyzed for {message.author.display_name}")
-                        await message.reply(embed=embed)
-
-                        # Budget update in private channel
-                        budget_text = build_budget_text(user_id, day_key, dt)
-                        budget_embed = discord.Embed(
-                            title="🎯  Daily Budget",
-                            description=budget_text,
-                            color=discord.Color.gold(),
-                            timestamp=dt,
-                        )
-                        await message.channel.send(embed=budget_embed)
-
-                        # Post to group channel
-                        group_channel = bot.get_channel(GROUP_CHANNEL_ID)
-                        if group_channel:
-                            totals = get_day_totals(user_id, day_key)
-                            target = get_target_kcal(user_id)
-                            summary_line = f"**{message.author.display_name}** logged a meal: **{parsed['kcal']} kcal** ({parsed['protein']:.0f}P / {parsed['carbs']:.0f}C / {parsed['fat']:.0f}F)"
-                            if target:
-                                remaining = target - totals["total_kcal"]
-                                if remaining > 0:
-                                    summary_line += f"\n📊 {totals['total_kcal']}/{target} kcal today — {remaining} remaining"
-                                else:
-                                    summary_line += f"\n⚠️ {totals['total_kcal']}/{target} kcal today — {abs(remaining)} over target"
-
-                            group_embed = discord.Embed(
-                                description=summary_line,
-                                color=discord.Color.blue(),
-                                timestamp=dt,
-                            )
-                            group_embed.set_thumbnail(url=attachment.url)
-                            await group_channel.send(embed=group_embed)
-
                     except Exception as e:
                         log.exception("Error analyzing image")
-                        await message.reply(f"⚠️ Sorry, I couldn't analyze that image: {e}")
+                        await message.reply(f"⚠️ Couldn't analyze that image: {e}")
+
+        # --- AUDIO / VOICE MESSAGE INPUT ---
+        elif has_audio:
+            attachment = audio_attachments[0]
+            log.info("Voice message from %s: %s", message.author, attachment.filename)
+            async with message.channel.typing():
+                try:
+                    audio_bytes = await attachment.read()
+                    transcript = await transcribe_audio(audio_bytes, attachment.filename)
+                    log.info("Transcribed voice: %s", transcript)
+
+                    # Show transcription
+                    await message.reply(f"🎤 *\"{transcript}\"*")
+
+                    # Analyze the transcribed text
+                    analysis = await analyze_food_text(transcript)
+                    await _process_meal_analysis(
+                        message, analysis, f"voice: {transcript[:50]}",
+                    )
+                except Exception as e:
+                    log.exception("Error processing voice message")
+                    await message.reply(f"⚠️ Couldn't process voice message: {e}")
+
+        # --- TEXT INPUT ---
+        elif has_text:
+            text = message.content.strip()
+            # Only analyze if it looks like a food description (at least 3 chars)
+            if len(text) >= 3:
+                log.info("Text meal from %s: %s", message.author, text[:80])
+                async with message.channel.typing():
+                    try:
+                        analysis = await analyze_food_text(text)
+                        await _process_meal_analysis(
+                            message, analysis, f"text: {text[:50]}",
+                        )
+                    except Exception as e:
+                        log.exception("Error analyzing text meal")
+                        await message.reply(f"⚠️ Couldn't analyze that: {e}")
 
     await bot.process_commands(message)
+
+
+async def _process_meal_analysis(
+    message: discord.Message,
+    analysis: str,
+    description: str,
+    thumbnail_url: str | None = None,
+):
+    """Shared logic: parse totals, store meal, send embeds to private + group channel."""
+    parsed = parse_totals(analysis)
+    display_text = strip_totals_line(analysis)
+
+    dt = now_tz()
+    day_key = get_food_day(dt)
+    window_idx = get_current_window_idx(dt)
+    if window_idx < 0:
+        window_idx = 0
+
+    user_id = str(message.author.id)
+    add_meal(
+        user_id, day_key, window_idx,
+        parsed["kcal"], parsed["protein"], parsed["carbs"], parsed["fat"],
+        description, analysis,
+    )
+    log.info("Stored meal: %s kcal for user %s on %s (window %d)",
+             parsed["kcal"], user_id, day_key, window_idx)
+
+    # Nutrition breakdown in private channel
+    embed = discord.Embed(
+        title="📊  Nutrition Breakdown",
+        description=display_text,
+        color=discord.Color.blue(),
+        timestamp=dt,
+    )
+    if thumbnail_url:
+        embed.set_thumbnail(url=thumbnail_url)
+    embed.set_footer(text=f"Analyzed for {message.author.display_name}")
+    await message.reply(embed=embed)
+
+    # Budget update
+    budget_text = build_budget_text(user_id, day_key, dt)
+    budget_embed = discord.Embed(
+        title="🎯  Daily Budget",
+        description=budget_text,
+        color=discord.Color.gold(),
+        timestamp=dt,
+    )
+    await message.channel.send(embed=budget_embed)
+
+    # Post to group channel
+    group_channel = bot.get_channel(GROUP_CHANNEL_ID)
+    if group_channel:
+        totals = get_day_totals(user_id, day_key)
+        target = get_target_kcal(user_id)
+        summary_line = f"**{message.author.display_name}** logged a meal: **{parsed['kcal']} kcal** ({parsed['protein']:.0f}P / {parsed['carbs']:.0f}C / {parsed['fat']:.0f}F)"
+        if target:
+            remaining = target - totals["total_kcal"]
+            if remaining > 0:
+                summary_line += f"\n📊 {totals['total_kcal']}/{target} kcal today — {remaining} remaining"
+            else:
+                summary_line += f"\n⚠️ {totals['total_kcal']}/{target} kcal today — {abs(remaining)} over target"
+
+        group_embed = discord.Embed(
+            description=summary_line,
+            color=discord.Color.blue(),
+            timestamp=dt,
+        )
+        if thumbnail_url:
+            group_embed.set_thumbnail(url=thumbnail_url)
+        await group_channel.send(embed=group_embed)
 
 
 # ---------------------------------------------------------------------------
