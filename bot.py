@@ -24,6 +24,8 @@ import discord
 from discord.ext import commands
 import anthropic
 from openai import OpenAI
+from google import genai
+from google.genai import types as genai_types
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
@@ -37,8 +39,9 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 GROUP_CHANNEL_ID = int(os.environ["DISCORD_CHANNEL_ID"])  # shared group channel
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Berlin")
 SERVER_ID = int(os.environ.get("DISCORD_SERVER_ID", "0"))
 
@@ -503,9 +506,16 @@ Upgrade to **FoodTracker Pro** ({PREMIUM_PRICE}) for up to **{PREMIUM_MONTHLY_CA
 Type `!trial` to start your **free {TRIAL_DAYS}-day trial** — no payment needed!"""
 
 # ---------------------------------------------------------------------------
-# AI clients
+# AI clients — Gemini 2.5 Flash Lite is primary; OpenAI/Anthropic are fallbacks
 # ---------------------------------------------------------------------------
-claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+GEMINI_MODEL = "gemini-2.5-flash-lite"
+# Gemini 2.5 Flash Lite pricing: $0.10/1M input, $0.40/1M output
+GEMINI_INPUT_PRICE = 0.10   # per 1M tokens
+GEMINI_OUTPUT_PRICE = 0.40  # per 1M tokens
+
+# Fallback clients (used if Gemini is not configured)
+claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 ANALYSIS_SYSTEM_PROMPT = """You are a nutrition analysis assistant. When given a photo of food, provide:
@@ -546,11 +556,31 @@ def strip_totals_line(analysis: str) -> str:
     return re.sub(r'\n?\$\$TOTALS:.*?\$\$\n?', '', analysis).strip()
 
 
-async def analyze_food_image(image_bytes: bytes, media_type: str = "image/jpeg") -> str:
-    """Send a food photo to OpenAI GPT-4o Vision and return the macro breakdown."""
-    if not openai_client:
-        raise ValueError("OpenAI API key not configured. Add OPENAI_API_KEY to env vars.")
+def _log_gemini_cost(label: str, usage):
+    """Log cost from a Gemini response's usage_metadata."""
+    inp = getattr(usage, "prompt_token_count", 0) or 0
+    out = getattr(usage, "candidates_token_count", 0) or 0
+    cost = (inp * GEMINI_INPUT_PRICE + out * GEMINI_OUTPUT_PRICE) / 1_000_000
+    log.info(f"[COST] {label} | in={inp} out={out} | ${cost:.6f}")
+    return cost
 
+
+async def analyze_food_image(image_bytes: bytes, media_type: str = "image/jpeg") -> str:
+    """Send a food photo to Gemini 2.5 Flash Lite and return the macro breakdown."""
+    if gemini_client:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                ANALYSIS_SYSTEM_PROMPT + "\n\nAnalyze this meal photo. Estimate macros (protein, carbs, fat) and total calories.",
+                genai_types.Part.from_bytes(data=image_bytes, mime_type=media_type),
+            ],
+            config=genai_types.GenerateContentConfig(max_output_tokens=1024),
+        )
+        _log_gemini_cost("photo_analysis", response.usage_metadata)
+        return response.text
+    # Fallback: OpenAI GPT-4o
+    if not openai_client:
+        raise ValueError("No AI API key configured. Add GEMINI_API_KEY or OPENAI_API_KEY to env vars.")
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     response = openai_client.chat.completions.create(
         model="gpt-4o",
@@ -560,25 +590,15 @@ async def analyze_food_image(image_bytes: bytes, media_type: str = "image/jpeg")
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{media_type};base64,{image_b64}",
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": "Analyze this meal photo. Estimate macros (protein, carbs, fat) and total calories.",
-                    },
+                    {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}},
+                    {"type": "text", "text": "Analyze this meal photo. Estimate macros (protein, carbs, fat) and total calories."},
                 ],
             },
         ],
     )
-    # --- COST LOGGING ---
     u = response.usage
     cost = (u.prompt_tokens * 2.50 + u.completion_tokens * 10.00) / 1_000_000
-    log.info(f"[COST] photo_analysis | in={u.prompt_tokens} out={u.completion_tokens} | ${cost:.6f}")
-    # --- END COST LOGGING ---
+    log.info(f"[COST] photo_analysis_fallback | in={u.prompt_tokens} out={u.completion_tokens} | ${cost:.6f}")
     return response.choices[0].message.content
 
 
@@ -598,23 +618,27 @@ This line must contain only integers (no decimals). This is used for automated t
 
 
 async def analyze_food_text(description: str) -> str:
-    """Send a text description of food to Claude and return the macro breakdown."""
+    """Send a text description of food to Gemini and return the macro breakdown."""
+    if gemini_client:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=TEXT_ANALYSIS_SYSTEM_PROMPT + f"\n\nI ate: {description}\n\nEstimate macros (protein, carbs, fat) and total calories.",
+            config=genai_types.GenerateContentConfig(max_output_tokens=1024),
+        )
+        _log_gemini_cost("text_analysis", response.usage_metadata)
+        return response.text
+    # Fallback: Claude Sonnet
+    if not claude:
+        raise ValueError("No AI API key configured. Add GEMINI_API_KEY or ANTHROPIC_API_KEY to env vars.")
     message = claude.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1024,
         system=TEXT_ANALYSIS_SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": f"I ate: {description}\n\nEstimate macros (protein, carbs, fat) and total calories.",
-            }
-        ],
+        messages=[{"role": "user", "content": f"I ate: {description}\n\nEstimate macros (protein, carbs, fat) and total calories."}],
     )
-    # --- COST LOGGING ---
     u = message.usage
     cost = (u.input_tokens * 3.00 + u.output_tokens * 15.00) / 1_000_000
-    log.info(f"[COST] text_analysis | in={u.input_tokens} out={u.output_tokens} | ${cost:.6f}")
-    # --- END COST LOGGING ---
+    log.info(f"[COST] text_analysis_fallback | in={u.input_tokens} out={u.output_tokens} | ${cost:.6f}")
     return message.content[0].text
 
 
@@ -644,56 +668,73 @@ This line must contain only integers (no decimals). This is used for automated t
 
 
 async def reevaluate_meal(original_analysis: str, corrections: str) -> str:
-    """Send original analysis + user corrections to Claude and return updated breakdown."""
+    """Send original analysis + user corrections to Gemini and return updated breakdown."""
+    prompt = (
+        CORRECTION_SYSTEM_PROMPT + "\n\n"
+        f"ORIGINAL ANALYSIS:\n{original_analysis}\n\n"
+        f"MY CORRECTIONS:\n{corrections}\n\n"
+        "Please apply my corrections and provide the updated nutrition breakdown."
+    )
+    if gemini_client:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(max_output_tokens=1024),
+        )
+        _log_gemini_cost("correction", response.usage_metadata)
+        return response.text
+    # Fallback: Claude Sonnet
+    if not claude:
+        raise ValueError("No AI API key configured. Add GEMINI_API_KEY or ANTHROPIC_API_KEY to env vars.")
     message = claude.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1024,
         system=CORRECTION_SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"ORIGINAL ANALYSIS:\n{original_analysis}\n\n"
-                    f"MY CORRECTIONS:\n{corrections}\n\n"
-                    "Please apply my corrections and provide the updated nutrition breakdown."
-                ),
-            }
-        ],
+        messages=[{"role": "user", "content": f"ORIGINAL ANALYSIS:\n{original_analysis}\n\nMY CORRECTIONS:\n{corrections}\n\nPlease apply my corrections and provide the updated nutrition breakdown."}],
     )
-    # --- COST LOGGING ---
     u = message.usage
     cost = (u.input_tokens * 3.00 + u.output_tokens * 15.00) / 1_000_000
-    log.info(f"[COST] correction | in={u.input_tokens} out={u.output_tokens} | ${cost:.6f}")
-    # --- END COST LOGGING ---
+    log.info(f"[COST] correction_fallback | in={u.input_tokens} out={u.output_tokens} | ${cost:.6f}")
     return message.content[0].text
 
 
 async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
-    """Transcribe audio using OpenAI Whisper API."""
-    if not openai_client:
-        raise ValueError("OpenAI API key not configured. Add OPENAI_API_KEY to env vars for voice message support.")
+    """Transcribe audio using Gemini (or Whisper as fallback)."""
+    # Determine MIME type from filename
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "ogg"
+    mime_map = {"ogg": "audio/ogg", "mp3": "audio/mp3", "wav": "audio/wav", "m4a": "audio/mp4", "mp4": "audio/mp4", "webm": "audio/webm"}
+    mime_type = mime_map.get(ext, "audio/ogg")
 
-    # Write to temp file (Whisper API needs a file-like object with a name)
-    suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ".ogg"
+    if gemini_client:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                "Transcribe the following audio. Return ONLY the transcription text, nothing else.",
+                genai_types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
+            ],
+            config=genai_types.GenerateContentConfig(max_output_tokens=256),
+        )
+        _log_gemini_cost("audio_transcription", response.usage_metadata)
+        return response.text.strip()
+
+    # Fallback: OpenAI Whisper
+    if not openai_client:
+        raise ValueError("No AI API key configured. Add GEMINI_API_KEY or OPENAI_API_KEY to env vars.")
+    suffix = "." + ext
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(audio_bytes)
         tmp_path = tmp.name
-
     try:
-        # Estimate audio duration from file size for cost logging
-        # Discord voice messages are Ogg/Opus ~6KB/sec on average
         audio_size_bytes = len(audio_bytes)
-        est_duration_sec = audio_size_bytes / 6000  # rough estimate
+        est_duration_sec = audio_size_bytes / 6000
         with open(tmp_path, "rb") as audio_file:
             transcript = openai_client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
             )
-        # --- COST LOGGING ---
         est_minutes = est_duration_sec / 60
         cost = est_minutes * 0.006
-        log.info(f"[COST] whisper_transcription | ~{est_duration_sec:.1f}s (~{est_minutes:.2f}min) | size={audio_size_bytes}B | ${cost:.6f}")
-        # --- END COST LOGGING ---
+        log.info(f"[COST] whisper_fallback | ~{est_duration_sec:.1f}s (~{est_minutes:.2f}min) | size={audio_size_bytes}B | ${cost:.6f}")
         return transcript.text
     finally:
         os.unlink(tmp_path)
@@ -817,25 +858,38 @@ def parse_quantity_modifier(text: str) -> float | None:
 
 
 async def interpret_quantity_with_ai(text: str, product_name: str, portion_note: str) -> float:
-    """Use Claude to interpret a complex quantity description and return a multiplier."""
+    """Use Gemini to interpret a complex quantity description and return a multiplier."""
+    prompt = (
+        "You help convert food quantity descriptions into a numeric multiplier. "
+        f"The base unit is: {portion_note} of {product_name}. "
+        "Return ONLY a single decimal number representing the multiplier. "
+        "Examples: 'half' → 0.5, '2 servings' → 2.0, '50g' (if base is per 100g) → 0.5, "
+        "'one spoon' (if base is per 100g) → 0.15. "
+        f"Return just the number, nothing else.\n\nUser input: {text}"
+    )
+    if gemini_client:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(max_output_tokens=20),
+        )
+        _log_gemini_cost("quantity_interpret", response.usage_metadata)
+        try:
+            return float(response.text.strip())
+        except ValueError:
+            return 1.0
+    # Fallback: Claude
+    if not claude:
+        return 1.0
     message = claude.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=100,
-        system=(
-            "You help convert food quantity descriptions into a numeric multiplier. "
-            "The base unit is: " + portion_note + " of " + product_name + ". "
-            "Return ONLY a single decimal number representing the multiplier. "
-            "Examples: 'half' → 0.5, '2 servings' → 2.0, '50g' (if base is per 100g) → 0.5, "
-            "'one spoon' (if base is per 100g) → 0.15. "
-            "Return just the number, nothing else."
-        ),
+        system=prompt,
         messages=[{"role": "user", "content": text}],
     )
-    # --- COST LOGGING ---
     u = message.usage
     cost = (u.input_tokens * 3.00 + u.output_tokens * 15.00) / 1_000_000
-    log.info(f"[COST] quantity_interpret | in={u.input_tokens} out={u.output_tokens} | ${cost:.6f}")
-    # --- END COST LOGGING ---
+    log.info(f"[COST] quantity_interpret_fallback | in={u.input_tokens} out={u.output_tokens} | ${cost:.6f}")
     try:
         return float(message.content[0].text.strip())
     except ValueError:

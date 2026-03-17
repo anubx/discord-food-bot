@@ -281,18 +281,30 @@ Before finalizing pricing, run a real-world test to get exact API costs (not est
 
 ---
 
-## Cost Structure (Current)
+## Cost Structure (Current — Gemini 2.5 Flash Lite)
+
+**Migrated from OpenAI GPT-4o + Anthropic Claude Sonnet → Google Gemini 2.5 Flash Lite (March 2026)**
 
 | Service | Cost | Notes |
 |---------|------|-------|
 | Railway hosting | ~$5/month | Starter plan, single container |
-| OpenAI API (GPT-4o Vision + Whisper) | Variable | ~$0.01 per image, ~$0.0015 per 15s audio |
-| Anthropic API (Claude Sonnet) | Variable | ~$0.008 per text analysis, ~$0.01 per correction |
+| **Gemini 2.5 Flash Lite** (primary) | $0.10/1M in, $0.40/1M out | All modalities: text, image, audio |
+| OpenAI API (fallback only) | $2.50/1M in, $10.00/1M out | GPT-4o Vision + Whisper |
+| Anthropic API (fallback only) | $3.00/1M in, $15.00/1M out | Claude Sonnet |
 | Open Food Facts | Free | No API key needed |
 | Discord | Free | Bot hosting is free |
 
-Estimated cost per active premium user: **~$2.07/month** (3 photos, 1 voice, 2 texts, 2 corrections per day).
-Estimated cost per free user: **~$0.72/month** (3 text logs per day).
+**Cost per interaction with Gemini: ~$0.00015** (27x cheaper than previous setup at ~$0.004).
+
+Estimated cost per active premium user (500 interactions/month): **~$0.075/month**.
+Estimated cost per free user (90 interactions/month): **~$0.014/month**.
+
+### Why Gemini 2.5 Flash Lite?
+- Cheapest stable multimodal model available (March 2026)
+- Handles text + image + audio natively — one API instead of three
+- Voice messages: single Gemini call replaces Whisper transcription + Claude analysis (2 calls → 1)
+- Gemini 2.0 Flash was deprecated; 2.5 Flash Lite is the stable replacement
+- OpenAI/Anthropic kept as optional fallbacks if GEMINI_API_KEY is not set
 
 ---
 
