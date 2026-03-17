@@ -44,6 +44,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Berlin")
 SERVER_ID = int(os.environ.get("DISCORD_SERVER_ID", "0"))
+PRO_SKU_ID = int(os.environ.get("PRO_SKU_ID", "1483496066660700252"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1310,6 +1311,45 @@ async def on_member_join(member: discord.Member):
         embed = build_welcome_embed()
         await group_channel.send(f"Welcome {member.mention}!", embed=embed)
         log.info("Sent welcome message for %s", member)
+
+
+@bot.event
+async def on_entitlement_create(entitlement: discord.Entitlement):
+    """Fired when a user subscribes to FoodTracker Pro via Discord."""
+    if entitlement.sku_id != PRO_SKU_ID:
+        return
+    user_id = str(entitlement.user_id)
+    set_premium(user_id, True)
+    log.info("Premium ACTIVATED via Discord subscription for user %s (entitlement %s)", user_id, entitlement.id)
+    # Try to DM or notify the user
+    try:
+        user = await bot.fetch_user(entitlement.user_id)
+        await user.send(
+            f"🎉 **Welcome to FoodTracker Pro!** Your subscription is active.\n\n"
+            f"You now have **{PREMIUM_MONTHLY_CAP} interactions/month** — photos, voice, barcodes, corrections, everything. Enjoy!"
+        )
+    except Exception:
+        log.info("Could not DM user %s about premium activation", user_id)
+
+
+@bot.event
+async def on_entitlement_update(entitlement: discord.Entitlement):
+    """Fired when a subscription is cancelled/expired."""
+    if entitlement.sku_id != PRO_SKU_ID:
+        return
+    # Check if the entitlement has ended (ends_at is set and in the past)
+    if entitlement.ends_at and entitlement.ends_at <= now_tz():
+        user_id = str(entitlement.user_id)
+        set_premium(user_id, False)
+        log.info("Premium DEACTIVATED for user %s (entitlement %s expired)", user_id, entitlement.id)
+        try:
+            user = await bot.fetch_user(entitlement.user_id)
+            await user.send(
+                f"Your **FoodTracker Pro** subscription has ended. You're back to {FREE_DAILY_CAP} interactions/day.\n\n"
+                f"Resubscribe anytime to get {PREMIUM_MONTHLY_CAP}/month back!"
+            )
+        except Exception:
+            log.info("Could not DM user %s about premium deactivation", user_id)
 
 
 @bot.event
