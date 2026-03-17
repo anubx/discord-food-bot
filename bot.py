@@ -783,9 +783,14 @@ A table with these columns using EXACTLY these emoji headers:
 | 🍽️ Food Item | ⚖️ Weight | 💪 Protein | 🍞 Carbs | 🧈 Fat | 🔥 Calories | 💧 Water |
 
 Rules:
-- List every identified food item with its estimated weight in grams
-- Protein, carbs, fat in grams. Calories in kcal. Water in ml (water content IN the food).
-- Last row: **Meal Totals** with sums
+- Each food item MUST start with a relevant food emoji (e.g. 🥚 Scrambled Eggs, 🥓 Bacon, 🍗 Chicken, 🍚 Rice, 🥗 Salad, 🍞 Bread, 🧀 Cheese, 🥩 Steak, 🍝 Pasta, 🥛 Milk, 🍌 Banana, etc.)
+- Weight column: include ⚖️ before the value (e.g. ⚖️ ~200g)
+- Protein column: include 💪 before the value (e.g. 💪 25g)
+- Carbs column: include 🍞 before the value (e.g. 🍞 30g)
+- Fat column: include 🧈 before the value (e.g. 🧈 12g)
+- Calories column: include 🔥 before the value (e.g. 🔥 350)
+- Water column: include 💧 before the value (e.g. 💧 120ml) — water content IN the food
+- Last row: **Meal Totals** with sums (also with emojis)
 - Water examples: soup ~300ml, salad ~150ml, rice ~80ml, dry snack ~5ml
 
 Be concise. If you're uncertain about portion sizes, state your assumptions briefly. Always give your best estimate rather than refusing.
@@ -885,9 +890,14 @@ A table with these columns using EXACTLY these emoji headers:
 | 🍽️ Food Item | ⚖️ Weight | 💪 Protein | 🍞 Carbs | 🧈 Fat | 🔥 Calories | 💧 Water |
 
 Rules:
-- List every identified food item with its estimated weight in grams
-- Protein, carbs, fat in grams. Calories in kcal. Water in ml (water content IN the food).
-- Last row: **Meal Totals** with sums
+- Each food item MUST start with a relevant food emoji (e.g. 🥚 Scrambled Eggs, 🥓 Bacon, 🍗 Chicken, 🍚 Rice, 🥗 Salad, 🍞 Bread, 🧀 Cheese, 🥩 Steak, 🍝 Pasta, 🥛 Milk, 🍌 Banana, etc.)
+- Weight column: include ⚖️ before the value (e.g. ⚖️ ~200g)
+- Protein column: include 💪 before the value (e.g. 💪 25g)
+- Carbs column: include 🍞 before the value (e.g. 🍞 30g)
+- Fat column: include 🧈 before the value (e.g. 🧈 12g)
+- Calories column: include 🔥 before the value (e.g. 🔥 350)
+- Water column: include 💧 before the value (e.g. 💧 120ml) — water content IN the food
+- Last row: **Meal Totals** with sums (also with emojis)
 - If the user doesn't specify portion sizes, assume typical serving sizes and state your assumptions briefly.
 - Water examples: soup ~300ml, salad ~150ml, rice ~80ml, dry snack ~5ml
 
@@ -940,6 +950,7 @@ Apply the user's corrections to the original analysis. For example:
 Provide the corrected full analysis as a table with these columns using EXACTLY these emoji headers:
 | 🍽️ Food Item | ⚖️ Weight | 💪 Protein | 🍞 Carbs | 🧈 Fat | 🔥 Calories | 💧 Water |
 
+Each food item MUST start with a relevant food emoji. Each value MUST include its column emoji (e.g. 💪 25g, 🧈 12g, 🔥 350, 💧 80ml).
 Last row: **Meal Totals** with sums. Be concise.
 
 IMPORTANT: At the very end of your response, include a single line in this exact format:
