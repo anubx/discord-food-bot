@@ -433,8 +433,90 @@ def lookup_barcode(barcode: str) -> dict | None:
         return None
 
 
-def build_barcode_analysis(product: dict) -> str:
+def parse_quantity_modifier(text: str) -> float | None:
+    """Parse a quantity modifier from the user's message text.
+    Returns a multiplier (e.g. 0.5 for 'half', 2.0 for '2 servings', etc.)
+    or None if no modifier is detected."""
+    if not text:
+        return None
+    text = text.strip().lower()
+
+    # "half" / "1/2"
+    if text in ("half", "1/2", "halbe", "halb"):
+        return 0.5
+    # "quarter" / "1/4"
+    if text in ("quarter", "1/4", "viertel"):
+        return 0.25
+    # "third" / "1/3"
+    if text in ("third", "1/3", "drittel"):
+        return 1/3
+    # "double" / "2x"
+    if text in ("double", "2x", "doppelt"):
+        return 2.0
+
+    # "X servings" / "X portions"
+    m = re.match(r'(\d+(?:\.\d+)?)\s*(?:servings?|portions?|stück|stk)', text)
+    if m:
+        return float(m.group(1))
+
+    # "Xg" / "X g" — scale relative to 100g base
+    m = re.match(r'(\d+(?:\.\d+)?)\s*g(?:rams?|ramm)?$', text)
+    if m:
+        return float(m.group(1)) / 100.0
+
+    # "X ml" — treat same as grams for liquids (rough approximation)
+    m = re.match(r'(\d+(?:\.\d+)?)\s*ml$', text)
+    if m:
+        return float(m.group(1)) / 100.0
+
+    # "X spoons" / "X tablespoons" / "X teaspoons" / "X löffel"
+    m = re.match(r'(\d+(?:\.\d+)?)\s*(?:spoons?|tablespoons?|tbsp|löffel|el)', text)
+    if m:
+        # ~15g per tablespoon
+        return float(m.group(1)) * 15 / 100.0
+
+    m = re.match(r'(\d+(?:\.\d+)?)\s*(?:teaspoons?|tsp|tl)', text)
+    if m:
+        # ~5g per teaspoon
+        return float(m.group(1)) * 5 / 100.0
+
+    # Plain number (e.g. "2" = 2 servings)
+    m = re.match(r'^(\d+(?:\.\d+)?)$', text)
+    if m:
+        return float(m.group(1))
+
+    # Use Claude to interpret complex quantities
+    return None
+
+
+async def interpret_quantity_with_ai(text: str, product_name: str, portion_note: str) -> float:
+    """Use Claude to interpret a complex quantity description and return a multiplier."""
+    message = claude.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=100,
+        system=(
+            "You help convert food quantity descriptions into a numeric multiplier. "
+            "The base unit is: " + portion_note + " of " + product_name + ". "
+            "Return ONLY a single decimal number representing the multiplier. "
+            "Examples: 'half' → 0.5, '2 servings' → 2.0, '50g' (if base is per 100g) → 0.5, "
+            "'one spoon' (if base is per 100g) → 0.15. "
+            "Return just the number, nothing else."
+        ),
+        messages=[{"role": "user", "content": text}],
+    )
+    try:
+        return float(message.content[0].text.strip())
+    except ValueError:
+        return 1.0
+
+
+def build_barcode_analysis(product: dict, multiplier: float = 1.0, quantity_text: str = "") -> str:
     """Build a display string + $$TOTALS$$ line from a barcode product lookup."""
+    kcal = int(product["kcal"] * multiplier)
+    protein = product["protein"] * multiplier
+    carbs = product["carbs"] * multiplier
+    fat = product["fat"] * multiplier
+
     lines = []
     name = product["name"]
     brand = product["brand"]
@@ -444,14 +526,19 @@ def build_barcode_analysis(product: dict) -> str:
         lines.append(f"**{name}**")
 
     lines.append(f"📦 Barcode: `{product['barcode']}`")
-    lines.append(f"📏 Nutrition {product['portion_note']}:\n")
+
+    if quantity_text and multiplier != 1.0:
+        lines.append(f"📏 Quantity: **{quantity_text}** ({multiplier:.2g}x of {product['portion_note']})\n")
+    else:
+        lines.append(f"📏 Nutrition {product['portion_note']}:\n")
+
     lines.append(f"| Nutrient | Amount |")
     lines.append(f"|----------|--------|")
-    lines.append(f"| Calories | {product['kcal']} kcal |")
-    lines.append(f"| Protein | {product['protein']:.1f}g |")
-    lines.append(f"| Carbs | {product['carbs']:.1f}g |")
-    lines.append(f"| Fat | {product['fat']:.1f}g |")
-    lines.append(f"\n$$TOTALS: kcal={product['kcal']}, protein={int(product['protein'])}, carbs={int(product['carbs'])}, fat={int(product['fat'])}$$")
+    lines.append(f"| Calories | {kcal} kcal |")
+    lines.append(f"| Protein | {protein:.1f}g |")
+    lines.append(f"| Carbs | {carbs:.1f}g |")
+    lines.append(f"| Fat | {fat:.1f}g |")
+    lines.append(f"\n$$TOTALS: kcal={kcal}, protein={int(protein)}, carbs={int(carbs)}, fat={int(fat)}$$")
 
     return "\n".join(lines)
 
@@ -879,11 +966,23 @@ async def on_message(message: discord.Message):
                         if barcode:
                             product = lookup_barcode(barcode)
                             if product:
-                                analysis = build_barcode_analysis(product)
+                                # Check for quantity modifier in the message text
+                                qty_text = message.content.strip()
+                                multiplier = 1.0
+                                if qty_text:
+                                    multiplier = parse_quantity_modifier(qty_text)
+                                    if multiplier is None:
+                                        # Complex text — use AI to interpret
+                                        multiplier = await interpret_quantity_with_ai(
+                                            qty_text, product["name"], product["portion_note"]
+                                        )
+                                    log.info("Quantity modifier: '%s' → %sx", qty_text, multiplier)
+
+                                analysis = build_barcode_analysis(product, multiplier, qty_text)
                                 thumb = product.get("image_url") or attachment.url
                                 await _process_meal_analysis(
                                     message, analysis,
-                                    f"barcode: {barcode} ({product['name']})",
+                                    f"barcode: {barcode} ({product['name']}) x{multiplier:.2g}",
                                     thumbnail_url=thumb,
                                 )
                                 continue
