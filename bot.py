@@ -1,9 +1,11 @@
 """
 Discord Food Tracker Bot
-- Private channels per user for meal photo uploads + personal tracking
-- Group channel with leaderboard, rankings, and daily summaries
+- DM-based food tracking (no private channels required)
+- Group channel with leaderboard and daily summaries
 - Claude Vision for food photo macro/kcal analysis
 - Text and voice message meal logging
+- Body fat tracking with Navy method
+- GDPR data deletion feature
 - 6 meal windows with 4am day boundary
 """
 
@@ -15,6 +17,7 @@ import logging
 import sqlite3
 import threading
 import tempfile
+import math
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -137,6 +140,15 @@ def init_db():
             timestamp TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_water_user_day ON water_log(user_id, day_key);
+        CREATE TABLE IF NOT EXISTS body_fat_log (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id   TEXT NOT NULL,
+            day_key   TEXT NOT NULL,
+            bf_pct    REAL NOT NULL,
+            method    TEXT NOT NULL DEFAULT 'navy',
+            timestamp TEXT NOT NULL,
+            UNIQUE(user_id, day_key)
+        );
     """)
     # Migration: add premium columns if they don't exist yet
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(user_settings)").fetchall()}
@@ -150,6 +162,7 @@ def init_db():
         "interaction_period": "ALTER TABLE user_settings ADD COLUMN interaction_period TEXT",
         "protein_target": "ALTER TABLE user_settings ADD COLUMN protein_target INTEGER",
         "fat_target": "ALTER TABLE user_settings ADD COLUMN fat_target INTEGER NOT NULL DEFAULT 50",
+        "bodyfat_consent": "ALTER TABLE user_settings ADD COLUMN bodyfat_consent INTEGER NOT NULL DEFAULT 0",
     }
     for col, sql in migrations.items():
         if col not in existing_cols:
@@ -442,6 +455,75 @@ def get_period_water(user_id: str, start_date: str, end_date: str) -> dict:
     return result
 
 
+
+# ---------------------------------------------------------------------------
+# Body fat tracking helpers
+# ---------------------------------------------------------------------------
+def navy_body_fat(gender: str, height_cm: float, waist_cm: float, neck_cm: float, hip_cm: float = 0) -> float:
+    """Calculate body fat % using US Navy method.
+    gender: 'male' or 'female'
+    hip_cm: required for female only"""
+    if gender.lower() == 'male':
+        # BF% = 86.010 * log10(waist - neck) - 70.041 * log10(height) + 36.76
+        bf = 86.010 * math.log10(waist_cm - neck_cm) - 70.041 * math.log10(height_cm) + 36.76
+    else:
+        # BF% = 163.205 * log10(waist + hip - neck) - 97.684 * log10(height) - 78.387
+        bf = 163.205 * math.log10(waist_cm + hip_cm - neck_cm) - 97.684 * math.log10(height_cm) - 78.387
+    return round(max(0, bf), 1)
+
+
+def get_bodyfat_consent(user_id: str) -> bool:
+    """Check if user has consented to body fat tracking."""
+    conn = get_db()
+    row = conn.execute("SELECT bodyfat_consent FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return bool(row["bodyfat_consent"]) if row else False
+
+
+def set_bodyfat_consent(user_id: str, consent: bool):
+    """Set body fat tracking consent."""
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO user_settings (user_id, bodyfat_consent) VALUES (?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET bodyfat_consent = ?",
+        (user_id, int(consent), int(consent)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def log_bodyfat(user_id: str, bf_pct: float, method: str = "navy"):
+    """Log body fat percentage for today (upsert)."""
+    day_key = get_food_day(now_tz())
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO body_fat_log (user_id, day_key, bf_pct, method, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (user_id, day_key, bf_pct, method, now_tz().isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.execute(
+            "UPDATE body_fat_log SET bf_pct = ?, timestamp = ? WHERE user_id = ? AND day_key = ?",
+            (bf_pct, now_tz().isoformat(), user_id, day_key),
+        )
+        conn.commit()
+        conn.close()
+        return False
+
+
+def get_bodyfat_history(user_id: str, limit: int = 30) -> list[dict]:
+    """Get recent body fat entries, newest first."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM body_fat_log WHERE user_id = ? ORDER BY day_key DESC LIMIT ?",
+        (user_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
 def get_day_photo_urls(user_id: str, day_key: str) -> list[str]:
     """Get all photo URLs for a user's meals on a given day."""
     conn = get_db()
@@ -479,7 +561,7 @@ def get_all_tracked_channel_ids() -> set[int]:
 
 def get_all_users() -> list[dict]:
     conn = get_db()
-    rows = conn.execute("SELECT * FROM user_settings WHERE private_channel IS NOT NULL").fetchall()
+    rows = conn.execute("SELECT * FROM user_settings").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1550,19 +1632,19 @@ def build_reminder_embed(label: str, emoji: str) -> discord.Embed:
 
 
 async def send_reminders(label: str, emoji: str):
-    """Send reminders to each user's private channel."""
+    """Send meal window reminders to users via DM."""
     users = get_all_users()
     embed = build_reminder_embed(label, emoji)
+    sent = 0
     for u in users:
-        ch_id = u.get("private_channel")
-        if ch_id:
-            channel = bot.get_channel(ch_id)
-            if channel:
-                try:
-                    await channel.send(embed=embed)
-                except Exception as e:
-                    log.warning("Failed to send reminder to channel %s: %s", ch_id, e)
-    log.info("Sent %s reminders to %d users", label, len(users))
+        user_id = u["user_id"]
+        try:
+            user = await bot.fetch_user(int(user_id))
+            await user.send(embed=embed)
+            sent += 1
+        except Exception as e:
+            log.warning("Failed to send reminder DM to user %s: %s", user_id, e)
+    log.info("Sent %s reminders to %d/%d users", label, sent, len(users))
 
 
 async def build_day_gif(user_id: str, day_key: str) -> io.BytesIO | None:
@@ -1610,7 +1692,7 @@ async def build_day_gif(user_id: str, day_key: str) -> io.BytesIO | None:
 
 
 async def send_daily_summary():
-    """4am: send personal summaries to private channels + group summary to group channel."""
+    """4am: send personal summaries to DMs + group summary to group channel."""
     dt = now_tz()
     prev_day = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -1619,14 +1701,9 @@ async def send_daily_summary():
         log.info("No users, skipping daily summary")
         return
 
-    # Send personal summaries to private channels
+    # Send personal summaries to DMs
     for u in users:
-        ch_id = u.get("private_channel")
-        if not ch_id:
-            continue
-        channel = bot.get_channel(ch_id)
-        if not channel:
-            continue
+        user_id = u["user_id"]
 
         user_id = u["user_id"]
         totals = get_day_totals(user_id, prev_day)
@@ -1695,15 +1772,16 @@ async def send_daily_summary():
 
         # Build and attach meal photo GIF
         try:
+            user = await bot.fetch_user(int(user_id))
             gif_buf = await build_day_gif(user_id, prev_day)
             if gif_buf:
                 gif_file = discord.File(gif_buf, filename=f"meals-{prev_day}.gif")
                 embed.set_image(url=f"attachment://meals-{prev_day}.gif")
-                await channel.send(embed=embed, file=gif_file)
+                await user.send(embed=embed, file=gif_file)
             else:
-                await channel.send(embed=embed)
+                await user.send(embed=embed)
         except Exception as e:
-            log.warning("Failed to send summary to %s: %s", ch_id, e)
+            log.warning("Failed to send summary to %s: %s", user_id, e)
 
     # Send group leaderboard to the group channel
     group_channel = bot.get_channel(GROUP_CHANNEL_ID)
@@ -1721,21 +1799,15 @@ async def send_daily_summary():
 
 
 async def send_morning_overview():
-    """8am: send welcome/overview to group channel + weight prompt to private channels."""
+    """8am: send welcome/overview to group channel + weight prompt to DMs."""
     group_channel = bot.get_channel(GROUP_CHANNEL_ID)
     if group_channel:
         await group_channel.send(embed=build_welcome_embed())
         log.info("Sent morning overview to group channel")
 
-    # Send weight prompt to each user's private channel
+    # Send weight prompt to DMs
     users = get_all_users()
     for u in users:
-        ch_id = u.get("private_channel")
-        if not ch_id:
-            continue
-        channel = bot.get_channel(ch_id)
-        if not channel:
-            continue
         user_id = u["user_id"]
         history = get_weight_history(user_id, limit=2)
         if history:
@@ -1751,9 +1823,10 @@ async def send_morning_overview():
         else:
             weight_line = "⚖️ **Good morning!** Start tracking your weight: `!weight 82.5`"
         try:
-            await channel.send(weight_line)
+            user = await bot.fetch_user(int(user_id))
+            await user.send(weight_line)
         except Exception as e:
-            log.warning("Failed to send weight prompt to %s: %s", ch_id, e)
+            log.warning("Failed to send weight prompt DM to user %s: %s", user_id, e)
     log.info("Sent morning weight prompts to %d users", len(users))
 
 
@@ -1819,12 +1892,18 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    """When someone joins the server, post the welcome overview in the group channel."""
+    """When someone joins the server, send them a DM with welcome message."""
+    try:
+        embed = build_welcome_embed()
+        await member.send(f"Welcome to FoodTracker, {member.name}!", embed=embed)
+        log.info("Sent welcome DM to %s", member)
+    except Exception as e:
+        log.warning("Could not send welcome DM to %s: %s", member, e)
+    
+    # Also post to group channel
     group_channel = bot.get_channel(GROUP_CHANNEL_ID)
     if group_channel:
-        embed = build_welcome_embed()
-        await group_channel.send(f"Welcome {member.mention}!", embed=embed)
-        log.info("Sent welcome message for %s", member)
+        await group_channel.send(f"🎉 {member.mention} joined!")
 
 
 @bot.event
@@ -1871,17 +1950,65 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
+    # Check if this is a DM
+    is_dm = isinstance(message.channel, discord.DMChannel)
+    
+    if is_dm:
+        # Auto-register user on first DM
+        user_id = str(message.author.id)
+        existing = get_target_kcal(user_id)
+        if not existing:
+            # Register with default target
+            conn = get_db()
+            conn.execute(
+                "INSERT INTO user_settings (user_id, target_kcal, display_name) VALUES (?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET display_name = ?",
+                (user_id, 2000, message.author.display_name, message.author.display_name),
+            )
+            conn.commit()
+            conn.close()
+            log.info("Auto-registered user %s (%s) on first DM", user_id, message.author.display_name)
+            # Send welcome message
+            try:
+                welcome = discord.Embed(
+                    title=f"🍽️  Welcome to FoodTracker, {message.author.display_name}!",
+                    description=(
+                        "I'm your meal tracking bot. Everything happens right here in DMs — "
+                        "only you and I can see your data.\n\n"
+                        "**Get started:**\n"
+                        "📸 **Send a food photo** — I'll analyze macros & calories\n"
+                        "🎤 **Voice message** — describe what you ate\n"
+                        "✍️ **Text** — e.g. \"two eggs and toast\"\n"
+                        "📦 **Barcode photo** — exact nutrition from the package\n\n"
+                        "**Your defaults:** 2000 kcal/day target\n"
+                        "Change with `!target 1800` · Set macros with `!macros protein=150`\n\n"
+                        "**All commands:** `!commands`\n\n"
+                        "Try it now — send me a food photo!"
+                    ),
+                    color=discord.Color.green(),
+                    timestamp=now_tz(),
+                )
+                await message.channel.send(embed=welcome)
+            except Exception as e:
+                log.warning("Could not send welcome to %s: %s", user_id, e)
+        else:
+            # Update display_name if it changed
+            conn = get_db()
+            conn.execute(
+                "UPDATE user_settings SET display_name = ? WHERE user_id = ?",
+                (message.author.display_name, user_id),
+            )
+            conn.commit()
+            conn.close()
+    
     log.info(
-        "Message in #%s (id=%s) from %s | attachments=%s | content_len=%s",
-        message.channel.name, message.channel.id, message.author,
-        len(message.attachments), len(message.content),
+        "Message in #%s (id=%s) from %s | DM=%s | attachments=%s | content_len=%s",
+        getattr(message.channel, 'name', 'DM'), message.channel.id, message.author,
+        is_dm, len(message.attachments), len(message.content),
     )
 
-    # Check if this is a tracked private channel
-    tracked_channels = get_all_tracked_channel_ids()
-    is_private_channel = message.channel.id in tracked_channels
-
-    if is_private_channel:
+    # Process messages from DMs only
+    if is_dm:
         # Skip if it looks like a command
         if message.content.startswith("!"):
             await bot.process_commands(message)
@@ -2072,7 +2199,6 @@ async def on_message(message: discord.Message):
                     except Exception as e:
                         log.exception("Error analyzing text meal")
                         await message.reply(f"⚠️ Couldn't analyze that: {e}")
-
     await bot.process_commands(message)
 
 
@@ -2145,27 +2271,8 @@ async def _process_meal_analysis(
         water_line += " ✅ Target reached!"
     await message.channel.send(water_line)
 
-    # Post to group channel
-    group_channel = bot.get_channel(GROUP_CHANNEL_ID)
-    if group_channel:
-        totals = get_day_totals(user_id, day_key)
-        target = get_target_kcal(user_id)
-        summary_line = f"**{message.author.display_name}** logged a meal: **{parsed['kcal']} kcal** ({parsed['protein']:.0f}P / {parsed['carbs']:.0f}C / {parsed['fat']:.0f}F)"
-        if target:
-            remaining = target - totals["total_kcal"]
-            if remaining > 0:
-                summary_line += f"\n📊 {totals['total_kcal']}/{target} kcal today — {remaining} remaining"
-            else:
-                summary_line += f"\n⚠️ {totals['total_kcal']}/{target} kcal today — {abs(remaining)} over target"
-
-        group_embed = discord.Embed(
-            description=summary_line,
-            color=discord.Color.blue(),
-            timestamp=dt,
-        )
-        if thumbnail_url:
-            group_embed.set_thumbnail(url=thumbnail_url)
-        await group_channel.send(embed=group_embed)
+    # Note: Individual meal posts are removed for privacy.
+    # Only leaderboard and aggregated summaries go to group channel.
 
 
 async def _send_premium_upsell(message: discord.Message, feature_name: str):
@@ -2286,76 +2393,49 @@ async def _handle_correction(message: discord.Message):
 # ---------------------------------------------------------------------------
 @bot.command(name="join")
 async def cmd_join(ctx: commands.Context):
-    """Create your private food tracking channel."""
+    """Register for food tracking (works in DMs or server channels)."""
     user_id = str(ctx.author.id)
 
-    # Check if already has a channel
-    existing = get_user_private_channel(user_id)
+    # Check if already registered
+    existing = get_target_kcal(user_id)
     if existing:
-        channel = bot.get_channel(existing)
-        if channel:
-            await ctx.reply(f"You already have a private channel: {channel.mention}")
-            return
-
-    guild = ctx.guild
-    if not guild:
-        await ctx.reply("This command must be used in a server.")
+        await ctx.reply(f"✅ You're already registered! Your target is {existing} kcal. Change it with `!target <kcal>`.")
         return
 
-    # Create private channel
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        ctx.author: discord.PermissionOverwrite(
-            view_channel=True, send_messages=True,
-            read_message_history=True, attach_files=True,
-        ),
-        guild.me: discord.PermissionOverwrite(
-            view_channel=True, send_messages=True,
-            read_message_history=True, embed_links=True,
-        ),
-    }
+    # Register user
+    set_target_kcal(user_id, 2000)
 
-    channel_name = f"food-{ctx.author.display_name.lower().replace(' ', '-')[:20]}"
+    # Send welcome DM
     try:
-        new_channel = await guild.create_text_channel(
-            name=channel_name,
-            overwrites=overwrites,
-            reason=f"FoodTracker private channel for {ctx.author}",
+        welcome = discord.Embed(
+            title=f"🍽️  Welcome, {ctx.author.display_name}!",
+            description=(
+                "**Food Tracking with DMs**\n\n"
+                "📸 **Send me a food photo** in DMs and I'll analyze it for macros & calories\n"
+                "🎤 **Or use voice** - describe what you ate\n"
+                "📝 **Or type** - tell me what you ate\n\n"
+                "Your daily target: **2000 kcal** (change with `!target <kcal>`)\n\n"
+                "Commands work in DMs: `!budget`, `!today`, `!target`, `!macros`, `!weight`, `!water`, `!streak`, `!weekly`, `!monthly`, `!undo`, `!delete`, `!edit`\n\n"
+                "Let's go!"
+            ),
+            color=discord.Color.green(),
+            timestamp=now_tz(),
         )
-    except discord.Forbidden:
-        await ctx.reply("⚠️ I don't have permission to create channels. Please give me the **Manage Channels** permission.")
-        return
+        await ctx.author.send(embed=welcome)
+    except Exception as e:
+        log.warning("Could not send welcome DM to %s: %s", ctx.author, e)
 
-    set_user_private_channel(user_id, new_channel.id, ctx.author.display_name)
-
-    # Set default target if not set
-    if get_target_kcal(user_id) is None:
-        set_target_kcal(user_id, 2000)
-
-    # Send welcome in the new private channel
-    welcome = discord.Embed(
-        title=f"🍽️  Welcome, {ctx.author.display_name}!",
-        description=(
-            "This is your private food tracking channel.\n\n"
-            "**Post a food photo** here and I'll analyze it for macros & calories.\n\n"
-            f"Your daily target is **2000 kcal** (change with `!target <kcal>`).\n\n"
-            "Reminders will appear here at each meal window. Let's go!"
-        ),
-        color=discord.Color.green(),
-        timestamp=now_tz(),
+    # Reply in current channel
+    await ctx.reply(
+        f"✅ Welcome to FoodTracker, {ctx.author.mention}! I've sent you a welcome message in DMs. "
+        f"Send food photos, voice, or text descriptions there to log meals!"
     )
-    await new_channel.send(embed=welcome)
 
-    # Confirm in group channel
-    await ctx.reply(f"✅ Your private channel is ready: {new_channel.mention}\nPost food photos there to start tracking!")
-
-    # Send updated overview to group channel
-    group_channel = bot.get_channel(GROUP_CHANNEL_ID)
-    if group_channel and group_channel.id != ctx.channel.id:
-        await group_channel.send(
-            f"🎉 **{ctx.author.display_name}** joined FoodTracker!",
-            embed=build_welcome_embed(),
-        )
+    # Announce in group channel if command was used in server
+    if ctx.guild:
+        group_channel = bot.get_channel(GROUP_CHANNEL_ID)
+        if group_channel and group_channel.id != ctx.channel.id:
+            await group_channel.send(f"🎉 **{ctx.author.display_name}** joined FoodTracker!")
 
 
 @bot.command(name="target")
@@ -2891,6 +2971,53 @@ async def cmd_removepremium(ctx: commands.Context, member: discord.Member = None
     await ctx.reply(f"🔒 **{member.display_name}** has been removed from FoodTracker Pro.")
 
 
+@bot.command(name="migrate")
+async def cmd_migrate(ctx: commands.Context):
+    """Admin command: notify all existing users about the switch to DMs."""
+    if not ctx.guild or not ctx.author.guild_permissions.administrator:
+        await ctx.reply("⚠️ Only server admins can use this command.")
+        return
+
+    users = get_all_users()
+    if not users:
+        await ctx.reply("No users to migrate.")
+        return
+
+    sent = 0
+    failed = 0
+    for u in users:
+        user_id = u["user_id"]
+        try:
+            user = await bot.fetch_user(int(user_id))
+            migrate_embed = discord.Embed(
+                title="🔄  FoodTracker has moved to DMs!",
+                description=(
+                    "**What changed:** All your meal tracking now happens right here in DMs "
+                    "with me — no more server channels.\n\n"
+                    "**Why:** Your food photos, weight, and health data are now truly private — "
+                    "not even server admins can see them.\n\n"
+                    "**What to do:** Just send me a food photo here in DMs to log a meal. "
+                    "All your existing data (meals, weight, water, streaks) is still here.\n\n"
+                    "**All commands still work:** `!budget`, `!today`, `!macros`, `!weight`, "
+                    "`!water`, `!streak`, `!weekly`, `!monthly`, `!history`\n\n"
+                    "Your old server channel can be deleted — you won't need it anymore."
+                ),
+                color=discord.Color.blue(),
+                timestamp=now_tz(),
+            )
+            await user.send(embed=migrate_embed)
+            sent += 1
+        except Exception as e:
+            log.warning("Failed to send migration DM to user %s: %s", user_id, e)
+            failed += 1
+
+    result = f"✅ Migration notices sent to **{sent}** users."
+    if failed:
+        result += f" ({failed} failed — they may have DMs disabled)"
+    result += "\n\nYou can now delete the old private food channels from the server."
+    await ctx.reply(result)
+
+
 @bot.command(name="macros")
 async def cmd_macros(ctx: commands.Context, *, values: str = None):
     """Set or view your macro targets. Usage: !macros protein=150 fat=60"""
@@ -3257,6 +3384,32 @@ def build_weekly_report(user_id: str, end_date: str | None = None) -> discord.Em
     if water_data["total_ml"] > 0:
         lines.append(f"💧 **Water avg**: {water_data['daily_avg']:.0f}ml/day ({water_data['days_logged']} days tracked)")
 
+    # Body fat trend
+    if get_bodyfat_consent(user_id):
+        bf_history = get_bodyfat_history(user_id, limit=50)
+        if bf_history:
+            lines.append("")
+            bf_entries = [bf for bf in bf_history if start <= bf["day_key"] <= end]
+            if bf_entries:
+                first_bf = bf_entries[-1]["bf_pct"]
+                last_bf = bf_entries[0]["bf_pct"]
+                bf_change = last_bf - first_bf
+                bf_sign = "+" if bf_change > 0 else ""
+                lines.append(f"💪 **Body Fat**: {first_bf:.1f}% → {last_bf:.1f}% (**{bf_sign}{bf_change:.1f}%**)")
+
+    # Body fat trend
+    if get_bodyfat_consent(user_id):
+        bf_history = get_bodyfat_history(user_id, limit=30)
+        if bf_history:
+            lines.append("")
+            bf_entries = [bf for bf in bf_history if start <= bf["day_key"] <= end]
+            if bf_entries:
+                first_bf = bf_entries[-1]["bf_pct"]
+                last_bf = bf_entries[0]["bf_pct"]
+                bf_change = last_bf - first_bf
+                bf_sign = "+" if bf_change > 0 else ""
+                lines.append(f"💪 **Body Fat**: {first_bf:.1f}% → {last_bf:.1f}% (**{bf_sign}{bf_change:.1f}%**)")
+
     # Day-by-day breakdown
     lines.append("\n**📋 Day-by-Day**")
     for d in daily_breakdown:
@@ -3378,6 +3531,32 @@ def build_monthly_report(user_id: str, year: int = None, month: int = None) -> d
     if water_data["total_ml"] > 0:
         lines.append(f"💧 **Water avg**: {water_data['daily_avg']:.0f}ml/day ({water_data['days_logged']} days tracked)")
 
+    # Body fat trend
+    if get_bodyfat_consent(user_id):
+        bf_history = get_bodyfat_history(user_id, limit=50)
+        if bf_history:
+            lines.append("")
+            bf_entries = [bf for bf in bf_history if start <= bf["day_key"] <= end]
+            if bf_entries:
+                first_bf = bf_entries[-1]["bf_pct"]
+                last_bf = bf_entries[0]["bf_pct"]
+                bf_change = last_bf - first_bf
+                bf_sign = "+" if bf_change > 0 else ""
+                lines.append(f"💪 **Body Fat**: {first_bf:.1f}% → {last_bf:.1f}% (**{bf_sign}{bf_change:.1f}%**)")
+
+    # Body fat trend
+    if get_bodyfat_consent(user_id):
+        bf_history = get_bodyfat_history(user_id, limit=30)
+        if bf_history:
+            lines.append("")
+            bf_entries = [bf for bf in bf_history if start <= bf["day_key"] <= end]
+            if bf_entries:
+                first_bf = bf_entries[-1]["bf_pct"]
+                last_bf = bf_entries[0]["bf_pct"]
+                bf_change = last_bf - first_bf
+                bf_sign = "+" if bf_change > 0 else ""
+                lines.append(f"💪 **Body Fat**: {first_bf:.1f}% → {last_bf:.1f}% (**{bf_sign}{bf_change:.1f}%**)")
+
     # Weekly breakdown
     lines.append("\n**📋 Week-by-Week**")
     week_num = 1
@@ -3399,27 +3578,23 @@ def build_monthly_report(user_id: str, year: int = None, month: int = None) -> d
 
 
 async def send_weekly_reports():
-    """Monday 4:30am: send weekly reports to all users."""
+    """Monday 4:30am: send weekly reports to all users via DM."""
     users = get_all_users()
     dt = now_tz()
     for u in users:
-        ch_id = u.get("private_channel")
-        if not ch_id:
-            continue
-        channel = bot.get_channel(ch_id)
-        if not channel:
-            continue
-        embed = build_weekly_report(u["user_id"])
+        user_id = u["user_id"]
+        embed = build_weekly_report(user_id)
         if embed:
             try:
-                await channel.send(embed=embed)
+                user = await bot.fetch_user(int(user_id))
+                await user.send(embed=embed)
             except Exception as e:
-                log.warning("Failed to send weekly report to %s: %s", ch_id, e)
+                log.warning("Failed to send weekly report to %s: %s", user_id, e)
     log.info("Sent weekly reports to %d users", len(users))
 
 
 async def send_monthly_reports():
-    """1st of month 5:00am: send monthly reports for previous month."""
+    """1st of month 5:00am: send monthly reports for previous month via DM."""
     users = get_all_users()
     dt = now_tz()
     # Previous month
@@ -3429,18 +3604,14 @@ async def send_monthly_reports():
     month = last_month_end.month
 
     for u in users:
-        ch_id = u.get("private_channel")
-        if not ch_id:
-            continue
-        channel = bot.get_channel(ch_id)
-        if not channel:
-            continue
-        embed = build_monthly_report(u["user_id"], year, month)
+        user_id = u["user_id"]
+        embed = build_monthly_report(user_id, year, month)
         if embed:
             try:
-                await channel.send(embed=embed)
+                user = await bot.fetch_user(int(user_id))
+                await user.send(embed=embed)
             except Exception as e:
-                log.warning("Failed to send monthly report to %s: %s", ch_id, e)
+                log.warning("Failed to send monthly report to %s: %s", user_id, e)
     log.info("Sent monthly reports for %d-%02d to %d users", year, month, len(users))
 
 
@@ -3505,3 +3676,145 @@ def _start_health_server():
 if __name__ == "__main__":
     _start_health_server()
     bot.run(DISCORD_BOT_TOKEN)
+@bot.command(name="bodyfat")
+async def cmd_bodyfat(ctx: commands.Context, subcommand: str = None, *args):
+    """Body fat tracking using Navy method. Usage: !bodyfat setup | !bodyfat confirm | !bodyfat male 180 85 38 | !bodyfat female 165 75 34 100 | !bodyfat delete"""
+    user_id = str(ctx.author.id)
+    
+    if subcommand is None:
+        # Show history if consented
+        if not get_bodyfat_consent(user_id):
+            await ctx.reply(
+                "You haven't consented to body fat tracking yet.\n"
+                "Type `!bodyfat setup` to learn about the feature and opt-in."
+            )
+            return
+        
+        history = get_bodyfat_history(user_id, limit=30)
+        if not history:
+            await ctx.reply("No body fat entries yet. Log one with: `!bodyfat male 180 85 38`")
+            return
+        
+        lines = ["**📊 Body Fat History (last 30)**\n"]
+        for entry in history:
+            lines.append(f"  {entry['day_key']}: **{entry['bf_pct']}%** ({entry['method']})")
+        
+        embed = discord.Embed(
+            title="💪 Body Fat History",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+            timestamp=now_tz(),
+        )
+        await ctx.reply(embed=embed)
+        return
+    
+    if subcommand.lower() == "setup":
+        await ctx.reply(
+            "**Body Fat Tracking (Navy Method)**\n\n"
+            "This uses the US Navy body fat estimation formula (no AI, calculated locally).\n\n"
+            "**What gets stored:**\n"
+            "Only the final body fat percentage (%) is stored.\n"
+            "Your measurement inputs (height, waist, neck, hip) are NOT saved — just the result.\n\n"
+            "**Privacy:**\n"
+            "- Data minimization: only the BF% percentage is kept\n"
+            "- Included in weekly/monthly reports if you consent\n\n"
+            "**Usage:**\n"
+            "`!bodyfat male 180 85 38` — height(cm) waist(cm) neck(cm)\n"
+            "`!bodyfat female 165 75 34 100` — height waist neck hip\n\n"
+            "Type `!bodyfat confirm` to opt-in."
+        )
+        return
+    
+    if subcommand.lower() == "confirm":
+        set_bodyfat_consent(user_id, True)
+        await ctx.reply("✅ Body fat tracking enabled. Log your first measurement: `!bodyfat male 180 85 38`")
+        return
+    
+    if subcommand.lower() == "delete":
+        set_bodyfat_consent(user_id, False)
+        conn = get_db()
+        conn.execute("DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        await ctx.reply("✅ All body fat data deleted and consent revoked.")
+        return
+    
+    # Parse gender and measurements
+    if subcommand.lower() not in ("male", "female"):
+        await ctx.reply("Invalid gender. Use: `!bodyfat male 180 85 38` or `!bodyfat female 165 75 34 100`")
+        return
+    
+    if not get_bodyfat_consent(user_id):
+        await ctx.reply("Please type `!bodyfat setup` and then `!bodyfat confirm` to opt-in first.")
+        return
+    
+    try:
+        if subcommand.lower() == "male":
+            if len(args) < 3:
+                await ctx.reply("Usage: `!bodyfat male <height_cm> <waist_cm> <neck_cm>`")
+                return
+            height = float(args[0])
+            waist = float(args[1])
+            neck = float(args[2])
+            bf_pct = navy_body_fat("male", height, waist, neck)
+        else:  # female
+            if len(args) < 4:
+                await ctx.reply("Usage: `!bodyfat female <height_cm> <waist_cm> <neck_cm> <hip_cm>`")
+                return
+            height = float(args[0])
+            waist = float(args[1])
+            neck = float(args[2])
+            hip = float(args[3])
+            bf_pct = navy_body_fat("female", height, waist, neck, hip)
+        
+        if bf_pct < 5 or bf_pct > 60:
+            await ctx.reply(f"⚠️ Result seems off: {bf_pct:.1f}%. Check your measurements and try again.")
+            return
+        
+        log_bodyfat(user_id, bf_pct)
+        await ctx.reply(f"✅ Logged body fat: **{bf_pct}%** (Navy method)")
+    
+    except (ValueError, TypeError):
+        await ctx.reply("Invalid measurements. Use numbers only: `!bodyfat male 180 85 38`")
+    except Exception as e:
+        log.exception("Error in bodyfat command")
+        await ctx.reply(f"⚠️ Error: {e}")
+
+
+@bot.command(name="deletedata")
+async def cmd_deletedata(ctx: commands.Context, confirm: str = None):
+    """GDPR: Permanently delete all your data. Usage: !deletedata | then !deletedata confirm"""
+    user_id = str(ctx.author.id)
+    
+    if confirm != "confirm":
+        await ctx.reply(
+            "⚠️ **This will permanently delete ALL your data:**\n"
+            "✗ Meals, nutrition logs\n"
+            "✗ Weight logs\n"
+            "✗ Water logs\n"
+            "✗ Body fat data\n"
+            "✗ Settings & preferences\n\n"
+            "**Type `!deletedata confirm` to proceed.**"
+        )
+        return
+    
+    conn = get_db()
+    try:
+        # Delete all user data
+        conn.execute("DELETE FROM meals WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM weight_log WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM water_log WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+        conn.commit()
+        log.info("GDPR deletion: user %s deleted all data", user_id)
+    finally:
+        conn.close()
+    
+    await ctx.reply(
+        "✅ **All your data has been permanently deleted.**\n"
+        "You can re-register anytime by messaging me `!join`."
+    )
+
+
+

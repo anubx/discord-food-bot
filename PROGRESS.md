@@ -28,14 +28,20 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 - [x] Auto budget update after each meal — remaining kcal split across future windows
 - [x] Body fat burn/gain estimate (7,700 kcal = 1kg fat)
 
+### DM-Based Architecture (Privacy Refactor — March 2026)
+- [x] **All tracking via Discord DMs** — meal logging, reports, weight, water, body fat all happen in private DMs between user and bot
+- [x] **No server channels needed** — removed private channel creation; admin cannot see user data
+- [x] **Auto-registration on first DM** — users are registered automatically when they first message the bot
+- [x] **`!join` simplified** — registers user and sends welcome DM, no channel creation
+- [x] **Group channel preserved** — leaderboard, daily group summary, join announcements still post to group channel
+- [x] **Privacy improvement** — individual meal details no longer posted to group channel, only aggregated leaderboard data
+- [x] **All scheduled jobs DM-based** — reminders, summaries, reports, weight prompts all sent via DM
+
 ### Multi-User & Social
-- [x] `!join` auto-provisions a private channel per user
-- [x] Private channels with permission overwrites (only user + bot can see)
-- [x] Group channel feed — meal summaries posted for all to see
 - [x] Daily leaderboard — ranked by closeness to calorie target
-- [x] 4am daily summary (personal + group) with fat burn estimates
-- [x] 8am morning overview in group channel
-- [x] Welcome message on member join
+- [x] 4am daily summary (personal DM + group leaderboard)
+- [x] 8am morning overview with weight prompt via DM
+- [x] Welcome DM on member join
 
 ### Macro Targets & Nutrition Goals
 - [x] **Protein-first macro system** — user sets kcal target → protein target → fat (default 50g, min 30g) → carbs auto-calculated from remainder
@@ -89,13 +95,29 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 - [x] **`!pro`** — shows tier status, interaction usage, upgrade info
 - [x] **`!trial`** — starts 7-day free trial, prevents double-use
 
+### Body Fat Tracking (Opt-in, GDPR-compliant)
+- [x] **Navy method calculation** — pure Python, no AI involved (height, waist, neck, hip → BF%)
+- [x] **Explicit opt-in consent** — `!bodyfat setup` explains data handling, `!bodyfat confirm` to opt in
+- [x] **Data minimization** — only BF% stored, raw measurements discarded immediately after calculation
+- [x] **`!bodyfat male 180 85 38`** — calculate and log BF% for male (height waist neck)
+- [x] **`!bodyfat female 165 75 34 100`** — calculate and log BF% for female (height waist neck hip)
+- [x] **`!bodyfat`** — view BF% history with trends
+- [x] **`!bodyfat delete`** — revoke consent and delete all body fat data
+- [x] **Integrated in reports** — weekly/monthly reports show BF% trend when user has consented
+
+### GDPR & Privacy Compliance
+- [x] **`!deletedata` command** — two-step confirmation, permanently deletes ALL user data (meals, weight, water, body fat, settings)
+- [x] **Privacy Policy v2** (`privacy.html`) — comprehensive update covering: DM architecture, body measurements, health data notice (GDPR Art. 9, CCPA, PIPEDA, FADP), data minimization, EU hosting, legal basis, international transfers, right to deletion via bot command
+- [x] **Health data classification** — body fat and weight data acknowledged as GDPR special category data with explicit consent
+- [x] **EU data residency** — Railway EU region, body fat data never leaves server
+
 ### Documentation & Legal
 - [x] Developer infographic (`infographic.html`) — full technical workflows + tech stack
 - [x] Customer infographic (`infographic-users.html`) — simplified user-facing guide
 - [x] Interactive cost simulator (`cost-simulator.html`) — per-user API cost calculator with scaling projections
 - [x] **`!info` carousel** — 7-page paginated Discord embed guide with Back/Next buttons
 - [x] **Terms of Service** (`terms.html`) — hosted on GitHub Pages
-- [x] **Privacy Policy** (`privacy.html`) — hosted on GitHub Pages, covers AI data processing, GDPR basics
+- [x] **Privacy Policy** (`privacy.html`) — hosted on GitHub Pages, covers AI data processing, health data, GDPR/CCPA/PIPEDA/FADP compliance
 - [x] **App icon** (`icon.png`) — 1024x1024 branded icon for Discord Developer Portal
 - [x] **API cost logging** — all 5 endpoints log token counts + exact costs to Railway logs
 
@@ -118,7 +140,7 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 | Barcode decoding | pyzbar + Pillow | Lightweight, works offline, no API needed |
 | Database | SQLite + WAL | Simple, no extra service needed, persistent via Railway volume |
 | Hosting | Railway | Easy Docker deploys, persistent volumes, auto-restart |
-| Channel architecture | Private per user + shared group | Privacy for meal photos, social motivation via group feed |
+| Channel architecture | **DM-based** + shared group | All tracking via DMs for genuine privacy; group channel for leaderboard only |
 | Day boundary | 4am | Late-night snacks count as same day, natural sleep boundary |
 | Tier gating | Interaction cap (not modality) | All modalities cost ~same; volume cap converts better than feature-locking |
 | Payments | Discord Premium App Subscriptions | Discord handles billing/refunds; 85/15 revenue split; Stripe Connect payouts |
@@ -126,6 +148,10 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 | Macro system | Protein-first, carbs as remainder | Users care most about protein; fat has 30g floor for hormonal health; carbs fill the gap |
 | Fat minimum | 30g (warn <50g) | Below 30g impairs hormone production; 50g is optimal threshold flagged in weekly reports |
 | Report schedule | Weekly Mon 4:30am, Monthly 1st 5:00am | After daily summary (4am) but before morning overview (8am) |
+| Body fat method | US Navy method (local Python) | No AI needed; data minimization — only BF% stored, measurements discarded |
+| Body fat consent | Explicit opt-in (GDPR Art. 9) | Health data = special category; requires affirmative action before any processing |
+| Data deletion | Self-service `!deletedata` | Instant deletion, no 30-day wait; covers GDPR, CCPA, PIPEDA, FADP right to erasure |
+| DM architecture | All tracking in DMs | Admin cannot see health data; genuine privacy vs private channels |
 
 ---
 
@@ -154,12 +180,16 @@ The dominant Discord food tracking bot. Features AI photo analysis, natural lang
 - **MealScout** — photo or text logging, no barcode scanning
 
 ### Our Differentiators vs CalorieBot
+- **DM-based privacy** — genuine privacy (admin can't see data), unlike channel-based bots
 - **Barcode scanning** with quantity modifiers (half, 2 spoons, 50g, etc.)
 - **Voice message input** (Whisper transcription)
 - **Reply-based natural language corrections** ("the steak is 200g not 300g")
-- **Social competition** — private channels + group leaderboard + daily rankings
+- **Social competition** — DM tracking + group leaderboard + daily rankings
 - **Scheduled reminders** at 6 meal windows throughout the day
+- **Body fat tracking** — opt-in Navy method with GDPR compliance
+- **Water tracking** — AI food water estimation + manual logging
 - **Body fat burn calculations** in daily summaries
+- **Self-service data deletion** — GDPR/CCPA compliant `!deletedata`
 
 ### Strategic Positioning
 CalorieBot is solo-focused. Our angle is **social/group accountability**: "Track together, compete together." This targets friend groups, gym buddy groups, fitness challenges, and weight loss accountability communities — a niche CalorieBot doesn't emphasize.
@@ -317,6 +347,9 @@ Expected ~$0.00015/interaction with Gemini 2.5 Flash Lite. Needs live testing to
 - [x] ~~Meal photo gallery~~ — **Done.** `!history` with daily GIF + photo GIF in daily summary
 - [x] ~~Weight logging~~ — **Done.** `!weight`, morning prompt, trends in reports
 - [x] ~~Water intake tracking~~ — **Done.** AI food water estimation + `!water` + post-meal prompts + daily target
+- [x] ~~Body fat estimation~~ — **Done.** Navy method, opt-in consent, data minimization, integrated in reports
+- [x] ~~DM-based architecture~~ — **Done.** All tracking via DMs, admin can't see data, auto-registration
+- [x] ~~GDPR right to deletion~~ — **Done.** `!deletedata` command, instant self-service deletion
 - [ ] Meal templates / favorites — save and reuse frequent meals (`!save breakfast1`, `!log breakfast1`)
 - [ ] Recipe analysis — paste a recipe URL and get per-serving macros
 - [ ] Restaurant menu lookup — "I'm eating at McDonald's, Big Mac combo"

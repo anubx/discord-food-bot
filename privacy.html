@@ -16,6 +16,8 @@
   a { color: #7c3aed; }
   .highlight { background: #f0fdf4; border-left: 4px solid #10b981; padding: 14px 18px; border-radius: 8px; margin: 16px 0; }
   .highlight p { margin-bottom: 0; }
+  .warning { background: #fef3c7; border-left: 4px solid #f59e0b; padding: 14px 18px; border-radius: 8px; margin: 16px 0; }
+  .warning p { margin-bottom: 0; }
   .footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid #e2e8f0; font-size: 0.82rem; color: #94a3b8; }
 </style>
 </head>
@@ -28,28 +30,38 @@
 <p>This Privacy Policy explains how FoodTracker ("the Bot", "we", "our"), operated by Rozek Industries Ltd., collects, uses, and protects your information when you use our Discord bot.</p>
 
 <div class="highlight">
-<p><strong>The short version:</strong> We store your meal data (calories, macros, descriptions) so the bot works. We don't sell your data. Food photos and voice messages are processed by AI APIs and not permanently stored by us.</p>
+<p><strong>The short version:</strong> All tracking happens in private DMs between you and the bot — no one else can see your data. We store your meal data (calories, macros, descriptions) so the bot works. We don't sell your data. Food photos and voice messages are processed by AI APIs and not permanently stored by us. Body fat measurements are never sent to any third party — they are calculated locally on our server and only the result (body fat percentage) is stored.</p>
 </div>
 
 <h2>1. Information We Collect</h2>
 
 <p><strong>Discord User Data:</strong> Your Discord user ID and display name. We do not collect your email, password, or other Discord account details.</p>
 
-<p><strong>Meal Data:</strong> When you log a meal, we store: the date and time, calorie and macro estimates (protein, carbs, fat), a text description of the meal, and which meal window it belongs to. This data is stored in our database to provide tracking, budgets, and leaderboards.</p>
+<p><strong>Meal Data:</strong> When you log a meal, we store: the date and time, calorie and macro estimates (protein, carbs, fat), water content estimates, a text description of the meal, and which meal window it belongs to. This data is stored in our database to provide tracking, budgets, and reports.</p>
 
-<p><strong>User Preferences:</strong> Your calorie target, premium/trial status, and interaction counts.</p>
+<p><strong>Weight Data:</strong> If you use the weight tracking feature (<code>!weight</code>), we store your daily weight entries (date and weight in kg).</p>
+
+<p><strong>Water Intake Data:</strong> If you use the water tracking feature (<code>!water</code>), we store your daily water intake amounts (date and ml).</p>
+
+<p><strong>Body Fat Estimates (opt-in only):</strong> If you explicitly opt in via the <code>!bodyfat setup</code> and <code>!bodyfat confirm</code> commands, the bot can calculate your body fat percentage using the US Navy method. We store <strong>only the calculated body fat percentage and date</strong> — your raw body measurements (height, waist, neck, hip circumference) are used for the calculation and <strong>immediately discarded</strong>. They are never stored, logged, or transmitted to any third party. The calculation is performed entirely on our server using a mathematical formula — no AI service is involved.</p>
+
+<div class="warning">
+<p><strong>Health Data Notice:</strong> Body fat percentages, weight entries, and nutritional tracking data may constitute "health data" under data protection regulations (GDPR Article 9, CCPA/CPRA, PIPEDA, Swiss FADP). Body fat tracking requires your explicit opt-in consent. You can revoke consent and delete all body fat data at any time with <code>!bodyfat delete</code>. You can delete <strong>all</strong> your data with <code>!deletedata</code>.</p>
+</div>
+
+<p><strong>User Preferences:</strong> Your calorie target, macro targets (protein, fat), premium/trial status, interaction counts, and consent flags (e.g., body fat tracking consent).</p>
 
 <p><strong>Content You Submit:</strong> Food photos, voice messages, and text descriptions are sent to third-party AI services for analysis (see Section 3). We do not permanently store photos or audio files on our servers — they are processed in real-time and discarded.</p>
 
 <h2>2. How We Use Your Information</h2>
 
-<p>We use your data exclusively to provide FoodTracker's features: meal analysis, calorie budget tracking, daily summaries, leaderboard rankings, and reminders. We do not use your data for advertising, profiling, or any purpose unrelated to the Bot's functionality.</p>
+<p>We use your data exclusively to provide FoodTracker's features: meal analysis, calorie and macro budget tracking, daily/weekly/monthly reports, streak tracking, weight and water monitoring, body fat estimation, and leaderboard rankings. We do not use your data for advertising, profiling, or any purpose unrelated to the Bot's functionality.</p>
 
 <h2>3. Third-Party AI Services</h2>
 
 <p>To analyze your meals, we send data to the following third-party AI APIs:</p>
 
-<p><strong>Google Gemini API</strong> (primary) — Processes food photos, text descriptions, voice messages, and barcode quantity interpretation. Subject to <a href="https://ai.google.dev/gemini-api/terms" target="_blank">Google's API Terms of Service</a>.</p>
+<p><strong>Google Gemini API</strong> (primary) — Processes food photos, text descriptions, voice messages, nutrition label reading, and barcode quantity interpretation. Subject to <a href="https://ai.google.dev/gemini-api/terms" target="_blank">Google's API Terms of Service</a>. A Data Processing Agreement (DPA) is in place via Google Cloud Console.</p>
 
 <p><strong>OpenAI API</strong> (fallback) — May process food photos (GPT-4o Vision) and voice messages (Whisper). Subject to <a href="https://openai.com/policies/terms-of-use" target="_blank">OpenAI's Terms of Use</a>.</p>
 
@@ -59,43 +71,79 @@
 
 <p><strong>Open Food Facts</strong> — Barcode lookups are sent to the Open Food Facts API (a public, open-source food database). No personal data is included in barcode requests.</p>
 
-<h2>4. Data Storage and Security</h2>
+<p><strong>Body fat calculations</strong> are performed entirely on our server using the US Navy method formula. No body measurements or body fat data is ever sent to any AI service or third party.</p>
 
-<p>Meal records and user preferences are stored in a SQLite database on our hosting provider (Railway). The database is stored on a persistent volume with access restricted to the Bot's runtime environment.</p>
+<h2>4. DM-Based Architecture</h2>
 
-<p>We take reasonable measures to protect your data but cannot guarantee absolute security. No internet-based service is 100% secure.</p>
+<p>All personal tracking interactions (meal logging, weight, water, body fat, reports) happen exclusively in private Discord DMs between you and the bot. <strong>No other user or server administrator can see your tracking data, meal photos, or health information.</strong></p>
 
-<h2>5. Data Retention</h2>
+<p>The only data shared in server channels is: your display name and aggregated calorie adherence percentage on the optional group leaderboard. Your photos, detailed macros, weight, body fat, and water data are never posted outside your private DM.</p>
 
-<p>Your meal data is retained as long as your account is active in FoodTracker. If you wish to have your data deleted, contact us (see Section 9) and we will remove all records associated with your Discord user ID within 30 days.</p>
+<h2>5. Data Storage and Security</h2>
+
+<p>All data is stored in a SQLite database on our hosting provider (Railway) in the <strong>European Union</strong>. The database is stored on a persistent volume with access restricted to the Bot's runtime environment.</p>
+
+<p>We take reasonable measures to protect your data, including: WAL-mode database journaling, restricted runtime access, and EU-based hosting to comply with GDPR data residency requirements. However, no internet-based service is 100% secure.</p>
+
+<h2>6. Data Retention</h2>
+
+<p>Your data is retained as long as your account is active in FoodTracker.</p>
 
 <p>Photos and voice messages are not stored — they are processed in memory and immediately discarded after analysis.</p>
 
-<h2>6. Data Sharing</h2>
+<p>Body measurement inputs (height, waist, neck, hip) are used only for the body fat calculation and immediately discarded. Only the calculated body fat percentage and date are retained.</p>
 
-<p>We do not sell, rent, or share your personal data with third parties, except as described in Section 3 (AI processing) and as required by law.</p>
+<p>You can delete all your data at any time using the <code>!deletedata</code> command (see Section 8).</p>
 
-<p>Within FoodTracker, the following data is shared with other users in your Discord server: meal summaries (food description and calorie total) posted to the group channel, and leaderboard rankings (display name and calorie adherence). Your detailed macro breakdowns and photos remain in your private channel.</p>
+<h2>7. Data Sharing</h2>
 
-<h2>7. Payments</h2>
+<p>We do not sell, rent, or share your personal data with third parties, except as described in Section 3 (AI processing for meal analysis only) and as required by law.</p>
+
+<p>Within FoodTracker, the only data shared with other users is your display name and calorie adherence percentage on the optional group leaderboard. All other data (meal details, photos, weight, body fat, water intake) remains private in your DMs.</p>
+
+<h2>8. Your Rights and Data Deletion</h2>
+
+<p>Under applicable data protection laws (GDPR, CCPA/CPRA, PIPEDA, Swiss FADP), you have the right to:</p>
+
+<p><strong>Access:</strong> Request a copy of the data we store about you.</p>
+
+<p><strong>Deletion:</strong> Delete all your data instantly using the <code>!deletedata</code> command. This permanently removes: all meal records, weight log entries, water intake records, body fat estimates, and your user settings/preferences. You can also selectively delete body fat data with <code>!bodyfat delete</code>.</p>
+
+<p><strong>Consent withdrawal:</strong> Revoke body fat tracking consent at any time with <code>!bodyfat delete</code>. This also deletes all body fat data.</p>
+
+<p><strong>Portability:</strong> Request an export of your data by contacting us.</p>
+
+<p><strong>Rectification:</strong> Correct any inaccurate data using the bot's edit commands (<code>!edit</code>) or by contacting us.</p>
+
+<p>To exercise any of these rights, use the in-bot commands or contact: <a href="mailto:rob@robrhose.com">rob@robrhose.com</a></p>
+
+<h2>9. Payments</h2>
 
 <p>Premium subscriptions are processed entirely by Discord through their Premium App Subscriptions system. We do not collect, store, or have access to your payment information (credit card, billing address, etc.). For payment-related concerns, refer to <a href="https://discord.com/privacy" target="_blank">Discord's Privacy Policy</a>.</p>
 
-<h2>8. Children's Privacy</h2>
+<h2>10. Children's Privacy</h2>
 
 <p>FoodTracker is not directed at children under 13. We do not knowingly collect data from children under 13. If you believe a child under 13 is using FoodTracker, please contact us and we will delete their data.</p>
 
-<h2>9. Your Rights</h2>
+<h2>11. Legal Basis for Processing (GDPR)</h2>
 
-<p>You have the right to: request a copy of the data we store about you, request deletion of all your data, stop using the Bot at any time (your data will remain unless you request deletion). To exercise these rights, contact: <a href="mailto:rob@robrhose.com">rob@robrhose.com</a></p>
+<p><strong>Meal tracking, weight, and water data:</strong> Legitimate interest (Art. 6(1)(f) GDPR) — necessary to provide the core service you signed up for.</p>
 
-<h2>10. Changes to This Policy</h2>
+<p><strong>Body fat estimation:</strong> Explicit consent (Art. 6(1)(a) and Art. 9(2)(a) GDPR) — body fat data is classified as health data (special category personal data under Art. 9). Processing only occurs after you explicitly opt in via the <code>!bodyfat confirm</code> command. You can withdraw consent at any time.</p>
 
-<p>We may update this Privacy Policy from time to time. Changes will be reflected in the "Last updated" date above. Continued use of the Bot after changes constitutes acceptance.</p>
+<h2>12. International Data Transfers</h2>
 
-<h2>11. Contact</h2>
+<p>Your primary data is stored in the EU (Railway EU region). Meal content (photos, text, audio) is sent to AI APIs that may process data outside the EU. Google, OpenAI, and Anthropic operate under Standard Contractual Clauses and/or adequacy decisions for international data transfers. Body fat data is never transferred outside our EU-based server.</p>
 
-<p>For privacy questions or data requests, contact: <a href="mailto:rob@robrhose.com">rob@robrhose.com</a></p>
+<h2>13. Changes to This Policy</h2>
+
+<p>We may update this Privacy Policy from time to time. Changes will be reflected in the "Last updated" date above. For material changes affecting health data processing, we will notify active users via DM. Continued use of the Bot after changes constitutes acceptance.</p>
+
+<h2>14. Contact and Data Protection</h2>
+
+<p>For privacy questions, data requests, or to exercise your rights, contact: <a href="mailto:rob@robrhose.com">rob@robrhose.com</a></p>
+
+<p>Data Controller: Rozek Industries Ltd.</p>
 
 <div class="footer">FoodTracker &mdash; Privacy Policy</div>
 
