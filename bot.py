@@ -641,12 +641,14 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 ANALYSIS_SYSTEM_PROMPT = """You are a nutrition analysis assistant. When given a photo of food, provide:
 
-1. **Identified foods** — list every item you can see
+1. **Identified foods** — list every item with its estimated weight in grams (e.g., "Chicken breast (~200g)")
 2. **Estimated macros per item** (protein, carbs, fat in grams)
 3. **Estimated calories per item**
 4. **Meal totals** — sum of protein, carbs, fat, and total kcal
 
-Be concise. Use a clean table format. If you're uncertain about portion sizes, state your assumptions (e.g., "assuming ~200g chicken breast"). Always give your best estimate rather than refusing.
+IMPORTANT: Always include the estimated weight (grams) next to each food item. This helps the user verify portion sizes.
+
+Be concise. Use a clean table format. If you're uncertain about portion sizes, state your assumptions. Always give your best estimate rather than refusing.
 
 IMPORTANT: At the very end of your response, include a single line in this exact format:
 $$TOTALS: kcal=NUMBER, protein=NUMBER, carbs=NUMBER, fat=NUMBER$$
@@ -725,10 +727,12 @@ async def analyze_food_image(image_bytes: bytes, media_type: str = "image/jpeg")
 
 TEXT_ANALYSIS_SYSTEM_PROMPT = """You are a nutrition analysis assistant. The user will describe what they ate in text. Provide:
 
-1. **Identified foods** — list every item mentioned
+1. **Identified foods** — list every item with its estimated weight in grams (e.g., "Chicken breast (~200g)")
 2. **Estimated macros per item** (protein, carbs, fat in grams)
 3. **Estimated calories per item**
 4. **Meal totals** — sum of protein, carbs, fat, and total kcal
+
+IMPORTANT: Always include the estimated weight (grams) next to each food item. This helps the user verify portion sizes.
 
 Be concise. Use a clean table format. If the user doesn't specify portion sizes, assume typical serving sizes and state your assumptions.
 
@@ -775,10 +779,12 @@ Apply the user's corrections to the original analysis. For example:
 - If they say "remove the rice", remove that item entirely
 
 Provide the corrected full analysis with:
-1. **Corrected foods** — updated list
+1. **Corrected foods** — updated list with estimated weight in grams (e.g., "Chicken breast (~200g)")
 2. **Estimated macros per item** (protein, carbs, fat in grams)
 3. **Estimated calories per item**
 4. **Meal totals** — updated sum of protein, carbs, fat, and total kcal
+
+IMPORTANT: Always include the estimated weight (grams) next to each food item.
 
 Be concise. Use a clean table format.
 
