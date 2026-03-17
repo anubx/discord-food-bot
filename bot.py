@@ -93,7 +93,9 @@ def init_db():
             premium_since   TEXT,
             trial_started   TEXT,
             photo_count_today INTEGER NOT NULL DEFAULT 0,
-            photo_count_day  TEXT
+            photo_count_day  TEXT,
+            interaction_count INTEGER NOT NULL DEFAULT 0,
+            interaction_period TEXT
         );
         CREATE TABLE IF NOT EXISTS meals (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,6 +120,8 @@ def init_db():
         "trial_started": "ALTER TABLE user_settings ADD COLUMN trial_started TEXT",
         "photo_count_today": "ALTER TABLE user_settings ADD COLUMN photo_count_today INTEGER NOT NULL DEFAULT 0",
         "photo_count_day": "ALTER TABLE user_settings ADD COLUMN photo_count_day TEXT",
+        "interaction_count": "ALTER TABLE user_settings ADD COLUMN interaction_count INTEGER NOT NULL DEFAULT 0",
+        "interaction_period": "ALTER TABLE user_settings ADD COLUMN interaction_period TEXT",
     }
     for col, sql in migrations.items():
         if col not in existing_cols:
@@ -329,8 +333,10 @@ def get_day_totals(user_id: str, day_key: str) -> dict:
 # Premium / subscription helpers
 # ---------------------------------------------------------------------------
 PREMIUM_PRICE = "$2.99/month"
-DAILY_PHOTO_CAP = 8
+DAILY_PHOTO_CAP = 8  # legacy — kept for photo-specific cap on premium users
 TRIAL_DAYS = 7
+FREE_DAILY_CAP = 3       # free users: 3 interactions/day (any modality)
+PREMIUM_MONTHLY_CAP = 500  # premium users: 500 interactions/month
 
 def is_premium(user_id: str) -> bool:
     """Check if a user has an active premium subscription or trial."""
@@ -428,22 +434,71 @@ def increment_photo_count(user_id: str):
     conn.commit()
     conn.close()
 
-PREMIUM_UPSELL = f"""✨ **This is a Premium feature!**
+def check_interaction_cap(user_id: str) -> tuple[bool, int]:
+    """Check if user is within their interaction cap.
+    Free users: FREE_DAILY_CAP per day. Premium users: PREMIUM_MONTHLY_CAP per month.
+    Returns (allowed, remaining).
+    """
+    premium = is_premium(user_id)
+    conn = get_db()
+    row = conn.execute(
+        "SELECT interaction_count, interaction_period FROM user_settings WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        cap = PREMIUM_MONTHLY_CAP if premium else FREE_DAILY_CAP
+        return True, cap
 
-Photo analysis, voice messages, barcode scanning, and meal corrections are part of **FoodTracker Pro** ({PREMIUM_PRICE}).
+    count = row["interaction_count"] or 0
+    period = row["interaction_period"] or ""
 
-**What you get with Pro:**
-📸 AI photo analysis (up to {DAILY_PHOTO_CAP}/day)
+    if premium:
+        # Monthly cap — period key is YYYY-MM
+        current_period = now_tz().strftime("%Y-%m")
+        cap = PREMIUM_MONTHLY_CAP
+    else:
+        # Daily cap — period key is the food day
+        current_period = get_food_day(now_tz())
+        cap = FREE_DAILY_CAP
+
+    # Reset if new period
+    if period != current_period:
+        count = 0
+        conn.execute(
+            "UPDATE user_settings SET interaction_count = 0, interaction_period = ? WHERE user_id = ?",
+            (current_period, user_id),
+        )
+        conn.commit()
+
+    conn.close()
+    remaining = cap - count
+    return count < cap, max(0, remaining)
+
+def increment_interaction_count(user_id: str):
+    """Increment the interaction counter for a user."""
+    premium = is_premium(user_id)
+    current_period = now_tz().strftime("%Y-%m") if premium else get_food_day(now_tz())
+    conn = get_db()
+    conn.execute(
+        "UPDATE user_settings SET interaction_count = interaction_count + 1, interaction_period = ? WHERE user_id = ?",
+        (current_period, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+PREMIUM_UPSELL = f"""⚡ **You've hit your daily limit!**
+
+Free users get **{FREE_DAILY_CAP} interactions/day** (any type — photos, voice, text, barcodes).
+
+Upgrade to **FoodTracker Pro** ({PREMIUM_PRICE}) for up to **{PREMIUM_MONTHLY_CAP} interactions/month**:
+📸 AI photo analysis
 🎤 Voice message meal logging
 📦 Barcode scanning with quantity modifiers
 ✏️ Reply-based meal corrections
 🔄 Photo reanalysis (`!analyze`)
 
-**Free tier includes:**
-✍️ Unlimited text-based meal logging
-🎯 Calorie budget tracking
-🏆 Leaderboard & daily summaries
-⏰ 6x daily reminders
+🎯 Calorie budget tracking, leaderboards & reminders are always free.
 
 Type `!trial` to start your **free {TRIAL_DAYS}-day trial** — no payment needed!"""
 
@@ -1227,7 +1282,17 @@ async def on_message(message: discord.Message):
         user_id = str(message.author.id)
         user_is_premium = is_premium(user_id)
 
-        # --- REPLY-BASED CORRECTION (Premium) ---
+        # --- INTERACTION CAP CHECK (all modalities) ---
+        allowed, remaining = check_interaction_cap(user_id)
+        if not allowed:
+            if user_is_premium:
+                await message.reply(f"You've used all **{PREMIUM_MONTHLY_CAP} interactions** this month. Your limit resets on the 1st!")
+            else:
+                await _send_premium_upsell(message, "interactions")
+            await bot.process_commands(message)
+            return
+
+        # --- REPLY-BASED CORRECTION ---
         # If user replies to a bot's Nutrition Breakdown embed, treat as correction
         if message.reference and message.reference.resolved:
             ref_msg = message.reference.resolved
@@ -1237,11 +1302,8 @@ async def on_message(message: discord.Message):
                 and any("Nutrition Breakdown" in (e.title or "") for e in ref_msg.embeds)
             )
             if is_correction_reply:
-                if not user_is_premium:
-                    await _send_premium_upsell(message, "Meal corrections")
-                    await bot.process_commands(message)
-                    return
                 await _handle_correction(message)
+                increment_interaction_count(user_id)
                 await bot.process_commands(message)
                 return
 
@@ -1259,18 +1321,8 @@ async def on_message(message: discord.Message):
         has_images = bool(image_attachments)
         has_audio = bool(audio_attachments)
 
-        # --- IMAGE INPUT (Premium) ---
+        # --- IMAGE INPUT ---
         if has_images:
-            if not user_is_premium:
-                await _send_premium_upsell(message, "Photo analysis")
-                await bot.process_commands(message)
-                return
-            # Check daily photo cap
-            allowed, remaining = check_photo_cap(user_id)
-            if not allowed:
-                await message.reply(f"📸 You've hit your daily photo limit ({DAILY_PHOTO_CAP}/day). Try logging via text instead, or wait until tomorrow!\n\n*Your limit resets at 4am.*")
-                await bot.process_commands(message)
-                return
             for attachment in image_attachments:
                 log.info("Food photo from %s: %s", message.author, attachment.filename)
                 async with message.channel.typing():
@@ -1302,6 +1354,7 @@ async def on_message(message: discord.Message):
                                     thumbnail_url=thumb,
                                 )
                                 increment_photo_count(user_id)
+                                increment_interaction_count(user_id)
                                 continue
                             else:
                                 await message.reply(f"📦 Barcode `{barcode}` detected but not found in Open Food Facts. Analyzing the image instead...")
@@ -1320,16 +1373,13 @@ async def on_message(message: discord.Message):
                             thumbnail_url=attachment.url,
                         )
                         increment_photo_count(user_id)
+                        increment_interaction_count(user_id)
                     except Exception as e:
                         log.exception("Error analyzing image")
                         await message.reply(f"⚠️ Couldn't analyze that image: {e}")
 
-        # --- AUDIO / VOICE MESSAGE INPUT (Premium) ---
+        # --- AUDIO / VOICE MESSAGE INPUT ---
         elif has_audio:
-            if not user_is_premium:
-                await _send_premium_upsell(message, "Voice message logging")
-                await bot.process_commands(message)
-                return
             attachment = audio_attachments[0]
             log.info("Voice message from %s: %s", message.author, attachment.filename)
             async with message.channel.typing():
@@ -1346,6 +1396,7 @@ async def on_message(message: discord.Message):
                     await _process_meal_analysis(
                         message, analysis, f"voice: {transcript[:50]}",
                     )
+                    increment_interaction_count(user_id)
                 except Exception as e:
                     log.exception("Error processing voice message")
                     await message.reply(f"⚠️ Couldn't process voice message: {e}")
@@ -1362,6 +1413,7 @@ async def on_message(message: discord.Message):
                         await _process_meal_analysis(
                             message, analysis, f"text: {text[:50]}",
                         )
+                        increment_interaction_count(user_id)
                     except Exception as e:
                         log.exception("Error analyzing text meal")
                         await message.reply(f"⚠️ Couldn't analyze that: {e}")
@@ -1440,9 +1492,9 @@ async def _process_meal_analysis(
 
 
 async def _send_premium_upsell(message: discord.Message, feature_name: str):
-    """Send a premium upsell embed when a free user tries a premium feature."""
+    """Send a premium upsell embed when a free user hits their daily cap."""
     embed = discord.Embed(
-        title=f"✨  {feature_name} — Premium Feature",
+        title=f"⚡ Daily limit reached",
         description=PREMIUM_UPSELL,
         color=discord.Color.purple(),
         timestamp=now_tz(),
@@ -1450,6 +1502,8 @@ async def _send_premium_upsell(message: discord.Message, feature_name: str):
     trial_left = get_trial_days_left(str(message.author.id))
     if trial_left is not None:
         embed.set_footer(text=f"Trial: {trial_left} days remaining")
+    else:
+        embed.set_footer(text=f"Type !trial for a free {TRIAL_DAYS}-day upgrade!")
     await message.reply(embed=embed)
 
 
@@ -1910,8 +1964,8 @@ async def cmd_pro(ctx: commands.Context):
             status = f"🎁 You're on a free trial — **{trial_left} days remaining**"
         else:
             status = "✅ You're a **Pro** member! All features unlocked."
-        allowed, remaining = check_photo_cap(user_id)
-        status += f"\n📸 Photo analyses today: {DAILY_PHOTO_CAP - remaining}/{DAILY_PHOTO_CAP}"
+        allowed, remaining = check_interaction_cap(user_id)
+        status += f"\n📊 Interactions this month: {PREMIUM_MONTHLY_CAP - remaining}/{PREMIUM_MONTHLY_CAP}"
         embed = discord.Embed(
             title="✨  FoodTracker Pro",
             description=status,
@@ -1919,9 +1973,11 @@ async def cmd_pro(ctx: commands.Context):
             timestamp=now_tz(),
         )
     else:
+        allowed, remaining = check_interaction_cap(user_id)
+        status = f"📊 Interactions today: {FREE_DAILY_CAP - remaining}/{FREE_DAILY_CAP}\n\n" + PREMIUM_UPSELL
         embed = discord.Embed(
             title="✨  FoodTracker Pro",
-            description=PREMIUM_UPSELL,
+            description=status,
             color=discord.Color.purple(),
             timestamp=now_tz(),
         )
@@ -1947,7 +2003,8 @@ async def cmd_trial(ctx: commands.Context):
     conn.close()
     if row and row["trial_started"]:
         await ctx.reply(
-            f"Your free trial has expired. Upgrade to **FoodTracker Pro** for {PREMIUM_PRICE} to keep using photo analysis, voice logging, barcode scanning, and corrections!\n\n"
+            f"Your free trial has expired. You're back to **{FREE_DAILY_CAP} interactions/day**.\n\n"
+            f"Upgrade to **FoodTracker Pro** for {PREMIUM_PRICE} to get **{PREMIUM_MONTHLY_CAP} interactions/month**!\n\n"
             "*(Discord Premium App subscriptions coming soon — for now, ask a server admin to activate your Pro status with `!setpremium @user`)*"
         )
         return
@@ -1956,13 +2013,9 @@ async def cmd_trial(ctx: commands.Context):
     embed = discord.Embed(
         title="🎉  Free Trial Activated!",
         description=(
-            f"You now have **{TRIAL_DAYS} days** of full FoodTracker Pro access!\n\n"
-            "**Unlocked features:**\n"
-            f"📸 AI photo analysis (up to {DAILY_PHOTO_CAP}/day)\n"
-            "🎤 Voice message meal logging\n"
-            "📦 Barcode scanning with quantity modifiers\n"
-            "✏️ Reply-based meal corrections\n"
-            "🔄 Photo reanalysis\n\n"
+            f"You now have **{TRIAL_DAYS} days** of FoodTracker Pro!\n\n"
+            f"**Upgraded to {PREMIUM_MONTHLY_CAP} interactions/month** (from {FREE_DAILY_CAP}/day).\n\n"
+            "All features are available: photos, voice, barcodes, corrections — go wild!\n\n"
             "Start by snapping a photo of your next meal!"
         ),
         color=discord.Color.green(),

@@ -108,23 +108,23 @@ CalorieBot is solo-focused. Our angle is **social/group accountability**: "Track
 
 ### Pricing Model: Freemium via Discord Premium App Subscriptions
 
-**Free Tier (acquisition — costs ~$0.50–0.72/user/month in API fees)**
-- Unlimited text-based meal logging (Claude — cheap)
-- Daily calorie budget tracking
-- Leaderboard access
-- 6x daily reminders
+**Free Tier — 3 interactions/day (any modality)**
+- All input types: photos, voice, text, barcodes, corrections
+- Capped at 3 per day (resets at 4am with the food day)
+- Calorie budget tracking, leaderboard, 6x daily reminders always free
+- Cost: ~$0.36/user/month (3 interactions × 30 days × $0.004)
 
-**Premium Tier — $2.99/month per user (7-day free trial)**
-- Photo analysis (GPT-4o Vision)
-- Voice message logging (Whisper + Claude)
-- Barcode scanning with quantity modifiers
-- Reply-based meal corrections
-- `!analyze` photo reanalysis
+**Premium Tier — $2.99/month, 500 interactions/month**
+- Same features as free, just 500/month instead of 3/day
+- 7-day free trial (custom implementation — Discord doesn't support native trials)
+
+**Why this split instead of modality-gating:**
+Real-world API cost testing showed all modalities cost ~$0.004 per interaction regardless of type (text, photo, voice). Gating by modality made users feel the free tier was broken. Giving everyone full access but capping volume creates better conversion: users experience the magic, want more.
 
 **Why $2.99:**
-Discord users skew younger and more price-sensitive. $2.99 is impulse-buy territory — well under MyFitnessPal ($9.99/mo) and Lose It ($3.33/mo). Margins are thin (~18%) but volume-dependent; the daily photo cap (8/day) prevents heavy users from blowing past breakeven.
+Discord users skew younger and more price-sensitive. $2.99 is impulse-buy territory — well under MyFitnessPal ($9.99/mo) and Lose It ($3.33/mo).
 
-**Note on trials:** Discord Premium App Subscriptions do **not** natively support free trials. Trial functionality is implemented custom in the bot using a `trial_started` timestamp in the database. After 7 days, users must subscribe through Discord's native payment flow.
+**Note on trials:** Discord Premium App Subscriptions do **not** natively support free trials. Trial functionality is implemented custom in the bot using a `trial_started` timestamp in the database. After 7 days, users must subscribe through Discord's native payment flow. This is fully legal — no Discord billing system is bypassed.
 
 ### Revenue Mechanics
 - Discord handles all billing, receipts, and refunds
@@ -133,33 +133,36 @@ Discord users skew younger and more price-sensitive. $2.99 is impulse-buy territ
 - Available to US, UK, EU developers
 - Subscription status checked in bot code via Discord API to gate features
 
-### Unit Economics (per the cost simulator)
+### Unit Economics (based on real API cost testing — March 2026)
+
+**Measured costs per interaction:** ~$0.004 (text: $0.004, photo: $0.004, voice: $0.005)
 
 | Metric | Value |
 |--------|-------|
-| Average API cost per premium user/month | ~$2.07 |
+| Cost per interaction (avg) | ~$0.004 |
+| Premium user max cost (500 interactions) | ~$2.00 |
 | Revenue after Discord's 15% cut | ~$2.54 |
-| Profit per premium user/month | ~$0.47 |
-| Margin | ~18% |
-| Free tier cost per user/month | ~$0.72 |
+| Profit per premium user/month | ~$0.54 |
+| Margin | ~21% |
+| Free tier cost per user/month (90 interactions) | ~$0.36 |
 | 7-day trial cost per user | ~$0.48 |
-| Acquisition cost (at 30% trial→paid conversion) | ~$1.61 |
+| Break-even ratio | 1 premium user covers ~1.5 free users |
 
 ### Scaling Projections (70% premium / 30% free split)
 
 | Users | Revenue | API Cost | Profit/month |
 |-------|---------|----------|-------------|
-| 25 | $45 | $41 | +$4 |
-| 50 | $89 | $82 | +$7 |
-| 100 | $178 | $165 | +$13 |
-| 250 | $445 | $412 | +$33 |
-| 500 | $889 | $823 | +$66 |
-| 1,000 | $1,778 | $1,647 | +$131 |
+| 25 | $45 | $35 | +$10 |
+| 50 | $89 | $70 | +$19 |
+| 100 | $178 | $140 | +$38 |
+| 250 | $445 | $351 | +$94 |
+| 500 | $889 | $701 | +$188 |
+| 1,000 | $1,778 | $1,403 | +$375 |
 
 ### Cost Controls
-- Cap photo analyses at 8/day per user (plenty for real use, prevents abuse)
+- Free users capped at 3 interactions/day (~90/month max)
+- Premium users capped at 500 interactions/month
 - Consider GPT-4o-mini for photos if margins tighten (~1/10th cost, slightly lower quality)
-- Free tier text-only keeps acquisition cost under $1/user/month
 
 ---
 
