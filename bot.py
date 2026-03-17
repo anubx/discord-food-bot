@@ -1,15 +1,13 @@
 """
 Discord Food Tracker Bot
-- Sends meal photo reminders at scheduled times
-- Analyzes food photos using Claude Vision for macros & kcal
-- Tracks daily calorie budget across 6 meal windows
-- 4am daily summary with surplus/deficit + bodyfat estimate
+- Private channels per user for meal photo uploads + personal tracking
+- Group channel with leaderboard, rankings, and daily summaries
+- Claude Vision for food photo macro/kcal analysis
+- 6 meal windows with 4am day boundary
 """
 
 import os
-import io
 import re
-import json
 import base64
 import logging
 import sqlite3
@@ -31,9 +29,10 @@ load_dotenv()
 # Config
 # ---------------------------------------------------------------------------
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
-DISCORD_CHANNEL_ID = int(os.environ["DISCORD_CHANNEL_ID"])
+GROUP_CHANNEL_ID = int(os.environ["DISCORD_CHANNEL_ID"])  # shared group channel
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Berlin")
+SERVER_ID = int(os.environ.get("DISCORD_SERVER_ID", "0"))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -45,10 +44,8 @@ logging.basicConfig(
 log = logging.getLogger("foodbot")
 
 # ---------------------------------------------------------------------------
-# Meal windows — each window: (start_hour, end_hour, label, emoji)
+# Meal windows — (start_hour, end_hour, label, emoji)
 # A "day" runs from 04:00 to 03:59 next day.
-# Meals before 4am count towards the previous day's last window.
-# Meals at/after 4am count towards the current day's first window.
 # ---------------------------------------------------------------------------
 MEAL_WINDOWS = [
     (8,  11, "Breakfast",       "🌅"),   # 08:00 – 10:59
@@ -56,10 +53,9 @@ MEAL_WINDOWS = [
     (14, 17, "Lunch",           "🥗"),   # 14:00 – 16:59
     (17, 20, "Afternoon Snack", "🍌"),   # 17:00 – 19:59
     (20, 23, "Dinner",          "🍽️"),   # 20:00 – 22:59
-    (23, 4,  "Evening Snack",   "🌙"),   # 23:00 – 03:59 (crosses midnight)
+    (23, 4,  "Evening Snack",   "🌙"),   # 23:00 – 03:59
 ]
 
-# Reminder hours (start of each window)
 REMINDER_HOURS = [(w[0], w[2], w[3]) for w in MEAL_WINDOWS]
 
 # ---------------------------------------------------------------------------
@@ -81,14 +77,16 @@ def init_db():
     conn = get_db()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS user_settings (
-            user_id     TEXT PRIMARY KEY,
-            target_kcal INTEGER NOT NULL DEFAULT 2000
+            user_id         TEXT PRIMARY KEY,
+            target_kcal     INTEGER NOT NULL DEFAULT 2000,
+            display_name    TEXT,
+            private_channel INTEGER
         );
         CREATE TABLE IF NOT EXISTS meals (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id     TEXT NOT NULL,
-            day_key     TEXT NOT NULL,       -- YYYY-MM-DD (the "food day", shifts at 4am)
-            window_idx  INTEGER NOT NULL,    -- 0-5
+            day_key     TEXT NOT NULL,
+            window_idx  INTEGER NOT NULL,
             timestamp   TEXT NOT NULL,
             kcal        INTEGER NOT NULL,
             protein_g   REAL NOT NULL DEFAULT 0,
@@ -110,17 +108,14 @@ def now_tz() -> datetime:
     return datetime.now(ZoneInfo(TIMEZONE))
 
 def get_food_day(dt: datetime) -> str:
-    """Return the 'food day' key. Before 4am counts as previous day."""
     if dt.hour < 4:
         dt = dt - timedelta(days=1)
     return dt.strftime("%Y-%m-%d")
 
 def get_current_window_idx(dt: datetime) -> int:
-    """Return which meal window (0-5) the given time falls into.
-    Times between 4:00-7:59 are before any window (return -1)."""
     h = dt.hour
     if 4 <= h < 8:
-        return -1  # between day boundary and first window
+        return -1
     if 8 <= h < 11:
         return 0
     if 11 <= h < 14:
@@ -131,29 +126,24 @@ def get_current_window_idx(dt: datetime) -> int:
         return 3
     if 20 <= h < 23:
         return 4
-    # 23:00-23:59 or 00:00-03:59
     return 5
 
 def get_remaining_windows(dt: datetime) -> list[int]:
-    """Return indices of windows that haven't ended yet (including current)."""
     h = dt.hour
-    remaining = []
     if h < 4:
-        # We're in window 5 (last window), nothing after
         return [5]
     if 4 <= h < 8:
-        # Before first window, all windows remain
         return [0, 1, 2, 3, 4, 5]
+    remaining = []
     for i, (start, end, _, _) in enumerate(MEAL_WINDOWS):
-        if i < 5:  # normal windows
+        if i < 5:
             if h < end:
                 remaining.append(i)
-        else:  # last window (23-4)
-            remaining.append(i)  # always remaining until 4am
+        else:
+            remaining.append(i)
     return remaining
 
 def is_last_window(dt: datetime) -> bool:
-    """Check if we're in the last meal window (23:00-03:59)."""
     return get_current_window_idx(dt) == 5
 
 # ---------------------------------------------------------------------------
@@ -174,6 +164,42 @@ def set_target_kcal(user_id: str, kcal: int):
     )
     conn.commit()
     conn.close()
+
+def get_user_private_channel(user_id: str) -> int | None:
+    conn = get_db()
+    row = conn.execute("SELECT private_channel FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if row and row["private_channel"]:
+        return row["private_channel"]
+    return None
+
+def set_user_private_channel(user_id: str, channel_id: int, display_name: str):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO user_settings (user_id, private_channel, display_name) VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET private_channel = ?, display_name = ?",
+        (user_id, channel_id, display_name, channel_id, display_name),
+    )
+    conn.commit()
+    conn.close()
+
+def get_all_tracked_channel_ids() -> set[int]:
+    conn = get_db()
+    rows = conn.execute("SELECT private_channel FROM user_settings WHERE private_channel IS NOT NULL").fetchall()
+    conn.close()
+    return {row["private_channel"] for row in rows}
+
+def get_all_users() -> list[dict]:
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM user_settings WHERE private_channel IS NOT NULL").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_user_by_channel(channel_id: int) -> dict | None:
+    conn = get_db()
+    row = conn.execute("SELECT * FROM user_settings WHERE private_channel = ?", (channel_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 def add_meal(user_id: str, day_key: str, window_idx: int, kcal: int,
              protein: float, carbs: float, fat: float,
@@ -234,7 +260,6 @@ This line must contain only integers (no decimals). This is used for automated t
 
 
 def parse_totals(analysis: str) -> dict:
-    """Extract the $$TOTALS: ...$$ line from Claude's response."""
     match = re.search(r'\$\$TOTALS:\s*kcal=(\d+),\s*protein=(\d+),\s*carbs=(\d+),\s*fat=(\d+)\$\$', analysis)
     if match:
         return {
@@ -243,7 +268,6 @@ def parse_totals(analysis: str) -> dict:
             "carbs": float(match.group(3)),
             "fat": float(match.group(4)),
         }
-    # Fallback: try to find any calorie number
     kcal_match = re.search(r'(\d[,\d]*)\s*(?:kcal|calories|cal)\b', analysis, re.IGNORECASE)
     if kcal_match:
         kcal_str = kcal_match.group(1).replace(",", "")
@@ -252,14 +276,11 @@ def parse_totals(analysis: str) -> dict:
 
 
 def strip_totals_line(analysis: str) -> str:
-    """Remove the $$TOTALS: ...$$ line from the display text."""
     return re.sub(r'\n?\$\$TOTALS:.*?\$\$\n?', '', analysis).strip()
 
 
 async def analyze_food_image(image_bytes: bytes, media_type: str = "image/jpeg") -> str:
-    """Send a food photo to Claude Vision and return the macro breakdown."""
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
     message = claude.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1024,
@@ -291,7 +312,6 @@ async def analyze_food_image(image_bytes: bytes, media_type: str = "image/jpeg")
 # Budget / tracking helpers
 # ---------------------------------------------------------------------------
 def build_budget_text(user_id: str, day_key: str, dt: datetime) -> str:
-    """Build the remaining calorie budget text after a meal."""
     target = get_target_kcal(user_id)
     if target is None:
         return "⚠️ No calorie target set. Use `!target <kcal>` to set one."
@@ -301,12 +321,9 @@ def build_budget_text(user_id: str, day_key: str, dt: datetime) -> str:
     remaining = target - consumed
 
     if is_last_window(dt):
-        # Last window: just show total + surplus/deficit + bodyfat
         return _build_end_of_day_text(target, consumed, remaining, totals)
 
-    # Normal window: show remaining total + per-window breakdown
     remaining_windows = get_remaining_windows(dt)
-    # Exclude already-passed windows
     current_idx = get_current_window_idx(dt)
     future_windows = [i for i in remaining_windows if i >= current_idx] if current_idx >= 0 else remaining_windows
 
@@ -342,9 +359,7 @@ def build_budget_text(user_id: str, day_key: str, dt: datetime) -> str:
 
 
 def _build_end_of_day_text(target: int, consumed: int, remaining: int, totals: dict) -> str:
-    """Build the last-window summary (no per-window breakdown)."""
     lines = []
-
     if remaining > 0:
         lines.append(f"**🌙 Last window — {remaining} kcal remaining** (of {target} kcal)")
     elif remaining == 0:
@@ -354,9 +369,7 @@ def _build_end_of_day_text(target: int, consumed: int, remaining: int, totals: d
 
     lines.append(f"📊 Today: {consumed} kcal | {totals['total_protein']:.0f}g P / {totals['total_carbs']:.0f}g C / {totals['total_fat']:.0f}g F")
 
-    # Deficit = fat burned; surplus = fat gained
-    # ~7,700 kcal ≈ 1 kg of body fat
-    deficit = target - consumed  # positive = deficit = fat loss
+    deficit = target - consumed
     if deficit > 0:
         fat_g = (deficit / 7700) * 1000
         lines.append(f"\n🔥 On track to exhale **{fat_g:.0f}g of body fat** today! Keep going.")
@@ -367,43 +380,124 @@ def _build_end_of_day_text(target: int, consumed: int, remaining: int, totals: d
     return "\n".join(lines)
 
 
-def build_daily_summary(user_id: str, day_key: str) -> str:
-    """Build the 4am daily summary for the previous food day."""
-    target = get_target_kcal(user_id)
-    totals = get_day_totals(user_id, day_key)
-    meals = get_day_meals(user_id, day_key)
-    consumed = totals["total_kcal"]
+# ---------------------------------------------------------------------------
+# Welcome / overview message
+# ---------------------------------------------------------------------------
+WELCOME_TEXT = """**🍽️ Welcome to FoodTracker!**
 
+Track your meals, hit your calorie goals, and compete with friends.
+
+**How it works:**
+Post a photo of your food in your private channel and the bot will analyze it for macros and calories using AI vision. Your daily budget updates automatically after each meal.
+
+**Commands:**
+`!join` — Create your private food tracking channel
+`!target <kcal>` — Set your daily calorie target (e.g. `!target 2000`)
+`!budget` — View your remaining calories for today
+`!today` — See all meals you've logged today
+`!analyze` — Reply to a food photo to (re-)analyze it
+`!leaderboard` — See today's group rankings
+`!schedule` — View the reminder schedule
+`!commands` — Show this list again
+`!ping` — Health check
+
+**Or just post a food photo** in your private channel and I'll handle the rest!"""
+
+
+def build_welcome_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🍽️  FoodTracker",
+        description=WELCOME_TEXT,
+        color=discord.Color.green(),
+        timestamp=now_tz(),
+    )
+    return embed
+
+
+# ---------------------------------------------------------------------------
+# Leaderboard / group summary
+# ---------------------------------------------------------------------------
+def build_leaderboard(day_key: str) -> str:
+    users = get_all_users()
+    if not users:
+        return "No users have joined yet. Use `!join` to get started!"
+
+    entries = []
+    for u in users:
+        totals = get_day_totals(u["user_id"], day_key)
+        target = u.get("target_kcal") or 0
+        consumed = totals["total_kcal"]
+        name = u.get("display_name") or f"User {u['user_id'][:8]}"
+        remaining = target - consumed if target else None
+        entries.append({
+            "name": name,
+            "consumed": consumed,
+            "target": target,
+            "remaining": remaining,
+            "protein": totals["total_protein"],
+            "carbs": totals["total_carbs"],
+            "fat": totals["total_fat"],
+            "meal_count": totals["meal_count"],
+        })
+
+    # Sort: who's closest to target (smallest remaining %, positive = under target)
+    def sort_key(e):
+        if e["target"] and e["target"] > 0:
+            return abs(e["consumed"] - e["target"]) / e["target"]
+        return 999
+    entries.sort(key=sort_key)
+
+    medals = ["🥇", "🥈", "🥉"]
     lines = []
-    lines.append(f"**📋 Daily Summary — {day_key}**\n")
-
-    if target:
-        diff = target - consumed
-        if diff > 0:
-            lines.append(f"🎯 Target: {target} kcal | Consumed: {consumed} kcal")
-            lines.append(f"✅ **Deficit: {diff} kcal**")
-            fat_g = (diff / 7700) * 1000
-            lines.append(f"🔥 You exhaled approximately **{fat_g:.0f}g of body fat** yesterday!")
-        elif diff == 0:
-            lines.append(f"🎯 Target: {target} kcal | Consumed: {consumed} kcal")
-            lines.append(f"✅ **Hit your target exactly!**")
+    for i, e in enumerate(entries):
+        medal = medals[i] if i < len(medals) else f"#{i+1}"
+        if e["target"]:
+            pct = (e["consumed"] / e["target"] * 100) if e["target"] > 0 else 0
+            status = f"{e['consumed']}/{e['target']} kcal ({pct:.0f}%)"
         else:
-            lines.append(f"🎯 Target: {target} kcal | Consumed: {consumed} kcal")
-            lines.append(f"⚠️ **Surplus: {abs(diff)} kcal**")
-            fat_g = (abs(diff) / 7700) * 1000
-            lines.append(f"📈 ~{fat_g:.0f}g potential fat storage.")
-    else:
-        lines.append(f"Total consumed: {consumed} kcal (no target set)")
+            status = f"{e['consumed']} kcal (no target)"
+        lines.append(f"{medal} **{e['name']}** — {status} | {e['meal_count']} meals | {e['protein']:.0f}P/{e['carbs']:.0f}C/{e['fat']:.0f}F")
 
-    lines.append(f"\n📊 **Macros**: {totals['total_protein']:.0f}g protein / {totals['total_carbs']:.0f}g carbs / {totals['total_fat']:.0f}g fat")
-    lines.append(f"🍽️ **Meals logged**: {totals['meal_count']}")
+    return "\n".join(lines)
 
-    if meals:
-        lines.append("\n**Meal breakdown:**")
-        for m in meals:
-            window = MEAL_WINDOWS[m["window_idx"]]
-            ts = datetime.fromisoformat(m["timestamp"]).strftime("%H:%M")
-            lines.append(f"  {window[3]} {ts} — {m['kcal']} kcal ({m['protein_g']:.0f}P / {m['carbs_g']:.0f}C / {m['fat_g']:.0f}F)")
+
+def build_daily_summary_group(day_key: str) -> str:
+    users = get_all_users()
+    if not users:
+        return "No meals logged yesterday."
+
+    lines = [f"**📋 Daily Summary — {day_key}**\n"]
+
+    entries = []
+    for u in users:
+        totals = get_day_totals(u["user_id"], day_key)
+        target = u.get("target_kcal") or 0
+        consumed = totals["total_kcal"]
+        name = u.get("display_name") or f"User {u['user_id'][:8]}"
+        diff = target - consumed if target else 0
+        entries.append({"name": name, "consumed": consumed, "target": target, "diff": diff, "totals": totals})
+
+    # Sort by deficit (biggest deficit first = most fat burned)
+    entries.sort(key=lambda e: e["diff"], reverse=True)
+
+    medals = ["🥇", "🥈", "🥉"]
+    for i, e in enumerate(entries):
+        medal = medals[i] if i < len(medals) else f"#{i+1}"
+        t = e["totals"]
+        if e["target"]:
+            if e["diff"] > 0:
+                fat_g = (e["diff"] / 7700) * 1000
+                result = f"✅ Deficit {e['diff']} kcal — exhaled ~{fat_g:.0f}g body fat"
+            elif e["diff"] == 0:
+                result = "✅ Hit target exactly"
+            else:
+                fat_g = (abs(e["diff"]) / 7700) * 1000
+                result = f"⚠️ Surplus {abs(e['diff'])} kcal (~{fat_g:.0f}g storage)"
+        else:
+            result = "No target set"
+
+        lines.append(f"{medal} **{e['name']}** — {e['consumed']} kcal | {t['total_protein']:.0f}P/{t['total_carbs']:.0f}C/{t['total_fat']:.0f}F")
+        lines.append(f"    {result}")
 
     return "\n".join(lines)
 
@@ -413,6 +507,7 @@ def build_daily_summary(user_id: str, day_key: str) -> str:
 # ---------------------------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -421,64 +516,115 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Reminder messages
 # ---------------------------------------------------------------------------
 def build_reminder_embed(label: str, emoji: str) -> discord.Embed:
-    tz = ZoneInfo(TIMEZONE)
-    now = datetime.now(tz)
     embed = discord.Embed(
         title=f"{emoji}  Time to log your {label}!",
-        description=(
-            "Snap a photo of your meal and post it here.\n"
-            "I'll analyze it for macros & calories automatically."
-        ),
+        description="Snap a photo of your meal and post it in your private channel.",
         color=discord.Color.green(),
-        timestamp=now,
+        timestamp=now_tz(),
     )
-    embed.set_footer(text="Reply with a food photo to get your breakdown")
+    embed.set_footer(text="Post a food photo to get your breakdown")
     return embed
 
 
-async def send_reminder(label: str, emoji: str):
-    """Called by the scheduler at each meal time."""
-    channel = bot.get_channel(DISCORD_CHANNEL_ID)
-    if channel is None:
-        log.warning("Could not find channel %s", DISCORD_CHANNEL_ID)
-        return
+async def send_reminders(label: str, emoji: str):
+    """Send reminders to each user's private channel."""
+    users = get_all_users()
     embed = build_reminder_embed(label, emoji)
-    await channel.send(embed=embed)
-    log.info("Sent %s reminder", label)
+    for u in users:
+        ch_id = u.get("private_channel")
+        if ch_id:
+            channel = bot.get_channel(ch_id)
+            if channel:
+                try:
+                    await channel.send(embed=embed)
+                except Exception as e:
+                    log.warning("Failed to send reminder to channel %s: %s", ch_id, e)
+    log.info("Sent %s reminders to %d users", label, len(users))
 
 
 async def send_daily_summary():
-    """Called by the scheduler at 4am to summarize the previous food day."""
-    channel = bot.get_channel(DISCORD_CHANNEL_ID)
-    if channel is None:
-        return
-
+    """4am: send personal summaries to private channels + group summary to group channel."""
     dt = now_tz()
-    # The food day that just ended is yesterday (since it's now 4am)
     prev_day = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Find all users who logged meals that day
-    conn = get_db()
-    users = conn.execute(
-        "SELECT DISTINCT user_id FROM meals WHERE day_key = ?", (prev_day,)
-    ).fetchall()
-    conn.close()
-
+    users = get_all_users()
     if not users:
-        log.info("No meals logged for %s, skipping daily summary", prev_day)
+        log.info("No users, skipping daily summary")
         return
 
-    for user_row in users:
-        user_id = user_row["user_id"]
-        summary = build_daily_summary(user_id, prev_day)
+    # Send personal summaries to private channels
+    for u in users:
+        ch_id = u.get("private_channel")
+        if not ch_id:
+            continue
+        channel = bot.get_channel(ch_id)
+        if not channel:
+            continue
+
+        user_id = u["user_id"]
+        totals = get_day_totals(user_id, prev_day)
+        meals = get_day_meals(user_id, prev_day)
+        target = u.get("target_kcal")
+        consumed = totals["total_kcal"]
+
+        lines = [f"**📋 Your Daily Summary — {prev_day}**\n"]
+        if target:
+            diff = target - consumed
+            lines.append(f"🎯 Target: {target} kcal | Consumed: {consumed} kcal")
+            if diff > 0:
+                fat_g = (diff / 7700) * 1000
+                lines.append(f"✅ **Deficit: {diff} kcal**")
+                lines.append(f"🔥 You exhaled approximately **{fat_g:.0f}g of body fat** yesterday!")
+            elif diff == 0:
+                lines.append(f"✅ **Hit your target exactly!**")
+            else:
+                fat_g = (abs(diff) / 7700) * 1000
+                lines.append(f"⚠️ **Surplus: {abs(diff)} kcal** (~{fat_g:.0f}g potential fat storage)")
+        else:
+            lines.append(f"Total consumed: {consumed} kcal (no target set)")
+
+        lines.append(f"\n📊 {totals['total_protein']:.0f}g P / {totals['total_carbs']:.0f}g C / {totals['total_fat']:.0f}g F")
+        lines.append(f"🍽️ {totals['meal_count']} meals logged")
+
+        if meals:
+            lines.append("\n**Meals:**")
+            for m in meals:
+                w = MEAL_WINDOWS[m["window_idx"]]
+                ts = datetime.fromisoformat(m["timestamp"]).strftime("%H:%M")
+                lines.append(f"  {w[3]} {ts} — {m['kcal']} kcal")
+
         embed = discord.Embed(
             title="🌅  Daily Summary",
-            description=summary,
+            description="\n".join(lines),
             color=discord.Color.purple(),
             timestamp=dt,
         )
-        await channel.send(embed=embed)
-        log.info("Sent daily summary for user %s, day %s", user_id, prev_day)
+        try:
+            await channel.send(embed=embed)
+        except Exception as e:
+            log.warning("Failed to send summary to %s: %s", ch_id, e)
+
+    # Send group leaderboard to the group channel
+    group_channel = bot.get_channel(GROUP_CHANNEL_ID)
+    if group_channel:
+        group_text = build_daily_summary_group(prev_day)
+        embed = discord.Embed(
+            title="🏆  Yesterday's Leaderboard",
+            description=group_text,
+            color=discord.Color.gold(),
+            timestamp=dt,
+        )
+        await group_channel.send(embed=embed)
+
+    log.info("Sent daily summaries for %s", prev_day)
+
+
+async def send_morning_overview():
+    """8am: send welcome/overview to group channel."""
+    group_channel = bot.get_channel(GROUP_CHANNEL_ID)
+    if group_channel:
+        await group_channel.send(embed=build_welcome_embed())
+        log.info("Sent morning overview to group channel")
 
 
 # ---------------------------------------------------------------------------
@@ -489,11 +635,12 @@ async def on_ready():
     log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
     init_db()
 
-    # Start the scheduler
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+
+    # Meal reminders to private channels
     for hour, label, emoji in REMINDER_HOURS:
         scheduler.add_job(
-            send_reminder,
+            send_reminders,
             CronTrigger(hour=hour, minute=0, timezone=TIMEZONE),
             args=[label, emoji],
             id=f"reminder_{hour}",
@@ -510,60 +657,68 @@ async def on_ready():
     )
     log.info("Scheduled daily summary at 04:00 %s", TIMEZONE)
 
+    # 8am morning overview in group channel
+    scheduler.add_job(
+        send_morning_overview,
+        CronTrigger(hour=8, minute=0, timezone=TIMEZONE),
+        id="morning_overview",
+        replace_existing=True,
+    )
+    log.info("Scheduled morning overview at 08:00 %s", TIMEZONE)
+
     scheduler.start()
 
 
 @bot.event
+async def on_member_join(member: discord.Member):
+    """When someone joins the server, post the welcome overview in the group channel."""
+    group_channel = bot.get_channel(GROUP_CHANNEL_ID)
+    if group_channel:
+        embed = build_welcome_embed()
+        await group_channel.send(f"Welcome {member.mention}!", embed=embed)
+        log.info("Sent welcome message for %s", member)
+
+
+@bot.event
 async def on_message(message: discord.Message):
-    # Ignore own messages
     if message.author == bot.user:
         return
 
-    # Debug logging
     log.info(
-        "Message in #%s (id=%s) from %s | attachments=%s | target_channel=%s",
+        "Message in #%s (id=%s) from %s | attachments=%s",
         message.channel.name, message.channel.id, message.author,
-        len(message.attachments), DISCORD_CHANNEL_ID,
+        len(message.attachments),
     )
 
-    # Check if message is in the tracked channel and has image attachments
-    if message.channel.id == DISCORD_CHANNEL_ID and message.attachments:
+    # Check if this is a tracked private channel
+    tracked_channels = get_all_tracked_channel_ids()
+    is_private_channel = message.channel.id in tracked_channels
+
+    if is_private_channel and message.attachments:
         for attachment in message.attachments:
             if any(attachment.filename.lower().endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif")):
                 log.info("Food photo received from %s: %s", message.author, attachment.filename)
 
-                # Send a "thinking" indicator
                 async with message.channel.typing():
                     try:
-                        # Download the image
                         image_bytes = await attachment.read()
-
-                        # Determine media type
                         ext = attachment.filename.rsplit(".", 1)[-1].lower()
                         media_map = {
-                            "png": "image/png",
-                            "jpg": "image/jpeg",
-                            "jpeg": "image/jpeg",
-                            "webp": "image/webp",
-                            "gif": "image/gif",
+                            "png": "image/png", "jpg": "image/jpeg",
+                            "jpeg": "image/jpeg", "webp": "image/webp", "gif": "image/gif",
                         }
                         media_type = media_map.get(ext, "image/jpeg")
 
-                        # Analyze with Claude Vision
                         analysis = await analyze_food_image(image_bytes, media_type)
-
-                        # Parse totals from the analysis
                         parsed = parse_totals(analysis)
                         display_text = strip_totals_line(analysis)
 
-                        # Determine food day and window
                         dt = now_tz()
                         day_key = get_food_day(dt)
                         window_idx = get_current_window_idx(dt)
                         if window_idx < 0:
-                            window_idx = 0  # Before first window, assign to first
+                            window_idx = 0
 
-                        # Store the meal
                         user_id = str(message.author.id)
                         add_meal(
                             user_id, day_key, window_idx,
@@ -573,7 +728,7 @@ async def on_message(message: discord.Message):
                         log.info("Stored meal: %s kcal for user %s on %s (window %d)",
                                  parsed["kcal"], user_id, day_key, window_idx)
 
-                        # Build response embed with analysis
+                        # Nutrition breakdown in private channel
                         embed = discord.Embed(
                             title="📊  Nutrition Breakdown",
                             description=display_text,
@@ -584,7 +739,7 @@ async def on_message(message: discord.Message):
                         embed.set_footer(text=f"Analyzed for {message.author.display_name}")
                         await message.reply(embed=embed)
 
-                        # Build and send budget embed
+                        # Budget update in private channel
                         budget_text = build_budget_text(user_id, day_key, dt)
                         budget_embed = discord.Embed(
                             title="🎯  Daily Budget",
@@ -594,28 +749,121 @@ async def on_message(message: discord.Message):
                         )
                         await message.channel.send(embed=budget_embed)
 
+                        # Post to group channel
+                        group_channel = bot.get_channel(GROUP_CHANNEL_ID)
+                        if group_channel:
+                            totals = get_day_totals(user_id, day_key)
+                            target = get_target_kcal(user_id)
+                            summary_line = f"**{message.author.display_name}** logged a meal: **{parsed['kcal']} kcal** ({parsed['protein']:.0f}P / {parsed['carbs']:.0f}C / {parsed['fat']:.0f}F)"
+                            if target:
+                                remaining = target - totals["total_kcal"]
+                                if remaining > 0:
+                                    summary_line += f"\n📊 {totals['total_kcal']}/{target} kcal today — {remaining} remaining"
+                                else:
+                                    summary_line += f"\n⚠️ {totals['total_kcal']}/{target} kcal today — {abs(remaining)} over target"
+
+                            group_embed = discord.Embed(
+                                description=summary_line,
+                                color=discord.Color.blue(),
+                                timestamp=dt,
+                            )
+                            group_embed.set_thumbnail(url=attachment.url)
+                            await group_channel.send(embed=group_embed)
+
                     except Exception as e:
                         log.exception("Error analyzing image")
                         await message.reply(f"⚠️ Sorry, I couldn't analyze that image: {e}")
 
-    # Process commands (e.g., !help)
     await bot.process_commands(message)
 
 
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
-@bot.command(name="target")
-async def cmd_target(ctx: commands.Context, kcal: int = None):
-    """Set or view your daily calorie target. Usage: !target 2000"""
+@bot.command(name="join")
+async def cmd_join(ctx: commands.Context):
+    """Create your private food tracking channel."""
     user_id = str(ctx.author.id)
 
+    # Check if already has a channel
+    existing = get_user_private_channel(user_id)
+    if existing:
+        channel = bot.get_channel(existing)
+        if channel:
+            await ctx.reply(f"You already have a private channel: {channel.mention}")
+            return
+
+    guild = ctx.guild
+    if not guild:
+        await ctx.reply("This command must be used in a server.")
+        return
+
+    # Create private channel
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        ctx.author: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True,
+            read_message_history=True, attach_files=True,
+        ),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True,
+            read_message_history=True, embed_links=True,
+        ),
+    }
+
+    channel_name = f"food-{ctx.author.display_name.lower().replace(' ', '-')[:20]}"
+    try:
+        new_channel = await guild.create_text_channel(
+            name=channel_name,
+            overwrites=overwrites,
+            reason=f"FoodTracker private channel for {ctx.author}",
+        )
+    except discord.Forbidden:
+        await ctx.reply("⚠️ I don't have permission to create channels. Please give me the **Manage Channels** permission.")
+        return
+
+    set_user_private_channel(user_id, new_channel.id, ctx.author.display_name)
+
+    # Set default target if not set
+    if get_target_kcal(user_id) is None:
+        set_target_kcal(user_id, 2000)
+
+    # Send welcome in the new private channel
+    welcome = discord.Embed(
+        title=f"🍽️  Welcome, {ctx.author.display_name}!",
+        description=(
+            "This is your private food tracking channel.\n\n"
+            "**Post a food photo** here and I'll analyze it for macros & calories.\n\n"
+            f"Your daily target is **2000 kcal** (change with `!target <kcal>`).\n\n"
+            "Reminders will appear here at each meal window. Let's go!"
+        ),
+        color=discord.Color.green(),
+        timestamp=now_tz(),
+    )
+    await new_channel.send(embed=welcome)
+
+    # Confirm in group channel
+    await ctx.reply(f"✅ Your private channel is ready: {new_channel.mention}\nPost food photos there to start tracking!")
+
+    # Send updated overview to group channel
+    group_channel = bot.get_channel(GROUP_CHANNEL_ID)
+    if group_channel and group_channel.id != ctx.channel.id:
+        await group_channel.send(
+            f"🎉 **{ctx.author.display_name}** joined FoodTracker!",
+            embed=build_welcome_embed(),
+        )
+
+
+@bot.command(name="target")
+async def cmd_target(ctx: commands.Context, kcal: int = None):
+    """Set or view your daily calorie target."""
+    user_id = str(ctx.author.id)
     if kcal is None:
         current = get_target_kcal(user_id)
         if current:
             await ctx.reply(f"🎯 Your daily target is **{current} kcal**. Use `!target <number>` to change it.")
         else:
-            await ctx.reply("No target set yet. Use `!target <number>` to set your daily calorie goal.\nExample: `!target 2000`")
+            await ctx.reply("No target set yet. Use `!target <number>` to set your daily calorie goal.")
         return
 
     if kcal < 500 or kcal > 10000:
@@ -623,7 +871,7 @@ async def cmd_target(ctx: commands.Context, kcal: int = None):
         return
 
     set_target_kcal(user_id, kcal)
-    await ctx.reply(f"✅ Daily calorie target set to **{kcal} kcal**. I'll track your remaining budget after each meal.")
+    await ctx.reply(f"✅ Daily calorie target set to **{kcal} kcal**.")
 
 
 @bot.command(name="budget")
@@ -663,7 +911,6 @@ async def cmd_today(ctx: commands.Context):
         lines.append(f"{window[3]} {ts} — {m['kcal']} kcal ({m['protein_g']:.0f}P / {m['carbs_g']:.0f}C / {m['fat_g']:.0f}F)")
 
     lines.append(f"\n**Total**: {totals['total_kcal']} kcal | {totals['total_protein']:.0f}g P / {totals['total_carbs']:.0f}g C / {totals['total_fat']:.0f}g F")
-
     if target:
         remaining = target - totals["total_kcal"]
         if remaining > 0:
@@ -675,6 +922,21 @@ async def cmd_today(ctx: commands.Context):
         title="🍽️  Today's Log",
         description="\n".join(lines),
         color=discord.Color.green(),
+        timestamp=dt,
+    )
+    await ctx.reply(embed=embed)
+
+
+@bot.command(name="leaderboard")
+async def cmd_leaderboard(ctx: commands.Context):
+    """Show today's group rankings."""
+    dt = now_tz()
+    day_key = get_food_day(dt)
+    text = build_leaderboard(day_key)
+    embed = discord.Embed(
+        title="🏆  Today's Leaderboard",
+        description=text,
+        color=discord.Color.gold(),
         timestamp=dt,
     )
     await ctx.reply(embed=embed)
@@ -718,8 +980,9 @@ async def cmd_schedule(ctx: commands.Context):
     """Show the current reminder schedule."""
     lines = [f"{emoji} **{label}** — {hour:02d}:00 {TIMEZONE}" for hour, label, emoji in REMINDER_HOURS]
     lines.append(f"📋 **Daily Summary** — 04:00 {TIMEZONE}")
+    lines.append(f"📢 **Morning Overview** — 08:00 {TIMEZONE}")
     embed = discord.Embed(
-        title="🗓️  Meal Reminder Schedule",
+        title="🗓️  Schedule",
         description="\n".join(lines),
         color=discord.Color.gold(),
     )
@@ -735,27 +998,11 @@ async def cmd_ping(ctx: commands.Context):
 @bot.command(name="commands")
 async def cmd_commands(ctx: commands.Context):
     """Show all available commands."""
-    lines = [
-        "`!target <kcal>` — Set your daily calorie target",
-        "`!budget` — View remaining calories for today",
-        "`!today` — See all meals logged today",
-        "`!analyze` — Reply to a food photo to (re-)analyze it",
-        "`!schedule` — View reminder schedule",
-        "`!ping` — Health check",
-        "`!commands` — This list",
-        "",
-        "**Or just post a food photo** and I'll analyze it automatically!",
-    ]
-    embed = discord.Embed(
-        title="📖  Available Commands",
-        description="\n".join(lines),
-        color=discord.Color.blurple(),
-    )
-    await ctx.reply(embed=embed)
+    await ctx.reply(embed=build_welcome_embed())
 
 
 # ---------------------------------------------------------------------------
-# Dummy HTTP server so Railway sees a listening port and doesn't kill us
+# HTTP health server for Railway
 # ---------------------------------------------------------------------------
 class _Health(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -763,7 +1010,7 @@ class _Health(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"ok")
     def log_message(self, *args):
-        pass  # silence access logs
+        pass
 
 def _start_health_server():
     port = int(os.environ.get("PORT", 8080))
