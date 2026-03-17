@@ -13,7 +13,7 @@ import os
 import re
 import io
 import csv
-import csv
+import time
 import base64
 import logging
 import sqlite3
@@ -864,6 +864,53 @@ DAILY_PHOTO_CAP = 8  # legacy — kept for photo-specific cap on premium users
 TRIAL_DAYS = 7
 FREE_DAILY_CAP = 3       # free users: 3 interactions/day (any modality)
 PREMIUM_MONTHLY_CAP = 500  # premium users: 500 interactions/month
+
+# ---------------------------------------------------------------------------
+# Rate limiting — in-memory, resets on restart (that's fine)
+# ---------------------------------------------------------------------------
+RATE_LIMIT_SECONDS = 3       # min seconds between interactions per user
+DAILY_HARD_CAP = 100         # absolute max interactions/day regardless of tier
+_rate_limit_last: dict[str, float] = {}   # user_id → last interaction timestamp
+_daily_count: dict[str, tuple[str, int]] = {}  # user_id → (day_key, count)
+
+
+def check_rate_limit(user_id: str) -> tuple[bool, float]:
+    """Check per-user rate limit. Returns (allowed, seconds_remaining)."""
+    now = time.monotonic()
+    last = _rate_limit_last.get(user_id, 0)
+    elapsed = now - last
+    if elapsed < RATE_LIMIT_SECONDS:
+        return False, RATE_LIMIT_SECONDS - elapsed
+    return True, 0
+
+
+def record_rate_limit(user_id: str):
+    """Record that an interaction just happened for rate limiting."""
+    _rate_limit_last[user_id] = time.monotonic()
+
+
+def check_daily_hard_cap(user_id: str) -> tuple[bool, int]:
+    """Check absolute daily interaction cap. Returns (allowed, remaining)."""
+    today = get_food_day(now_tz())
+    entry = _daily_count.get(user_id)
+    if entry is None or entry[0] != today:
+        _daily_count[user_id] = (today, 0)
+        return True, DAILY_HARD_CAP
+
+    count = entry[1]
+    remaining = DAILY_HARD_CAP - count
+    return count < DAILY_HARD_CAP, max(0, remaining)
+
+
+def increment_daily_hard_cap(user_id: str):
+    """Increment the daily hard cap counter."""
+    today = get_food_day(now_tz())
+    entry = _daily_count.get(user_id)
+    if entry is None or entry[0] != today:
+        _daily_count[user_id] = (today, 1)
+    else:
+        _daily_count[user_id] = (today, entry[1] + 1)
+
 
 def is_premium(user_id: str) -> bool:
     """Check if a user has an active premium subscription or trial."""
@@ -2200,6 +2247,18 @@ async def on_message(message: discord.Message):
         user_id = str(message.author.id)
         user_is_premium = is_premium(user_id)
 
+        # --- RATE LIMIT CHECK (per-user, 1 interaction per 3s) ---
+        rate_ok, wait_secs = check_rate_limit(user_id)
+        if not rate_ok:
+            await message.reply(f"⏳ Please wait {wait_secs:.0f}s before sending another meal.")
+            return
+
+        # --- DAILY HARD CAP CHECK (100/day absolute max) ---
+        cap_ok, cap_remaining = check_daily_hard_cap(user_id)
+        if not cap_ok:
+            await message.reply(f"🛑 You've hit the daily limit of **{DAILY_HARD_CAP} interactions**. Try again tomorrow!")
+            return
+
         # --- INTERACTION CAP CHECK (all modalities) ---
         allowed, remaining = check_interaction_cap(user_id)
         if not allowed:
@@ -2222,6 +2281,8 @@ async def on_message(message: discord.Message):
             if is_correction_reply:
                 await _handle_correction(message)
                 increment_interaction_count(user_id)
+                record_rate_limit(user_id)
+                increment_daily_hard_cap(user_id)
                 await bot.process_commands(message)
                 return
 
@@ -2288,6 +2349,8 @@ async def on_message(message: discord.Message):
                                 )
                                 increment_photo_count(user_id)
                                 increment_interaction_count(user_id)
+                                record_rate_limit(user_id)
+                                increment_daily_hard_cap(user_id)
                                 continue
                             else:
                                 await message.reply(f"📦 Barcode `{barcode}` detected but not found in Open Food Facts. Analyzing the image instead...")
@@ -2330,6 +2393,8 @@ async def on_message(message: discord.Message):
                             )
                             increment_photo_count(user_id)
                             increment_interaction_count(user_id)
+                            record_rate_limit(user_id)
+                            increment_daily_hard_cap(user_id)
                             continue
 
                         analysis = await analyze_food_image(image_bytes, media_type)
@@ -2339,6 +2404,8 @@ async def on_message(message: discord.Message):
                         )
                         increment_photo_count(user_id)
                         increment_interaction_count(user_id)
+                        record_rate_limit(user_id)
+                        increment_daily_hard_cap(user_id)
                     except Exception as e:
                         log.exception("Error analyzing image")
                         await message.reply(f"⚠️ Couldn't analyze that image: {e}")
@@ -2362,6 +2429,8 @@ async def on_message(message: discord.Message):
                         message, analysis, f"voice: {transcript[:50]}",
                     )
                     increment_interaction_count(user_id)
+                    record_rate_limit(user_id)
+                    increment_daily_hard_cap(user_id)
                 except Exception as e:
                     log.exception("Error processing voice message")
                     await message.reply(f"⚠️ Couldn't process voice message: {e}")
@@ -2379,6 +2448,8 @@ async def on_message(message: discord.Message):
                             message, analysis, f"text: {text[:50]}",
                         )
                         increment_interaction_count(user_id)
+                        record_rate_limit(user_id)
+                        increment_daily_hard_cap(user_id)
                     except Exception as e:
                         log.exception("Error analyzing text meal")
                         await message.reply(f"⚠️ Couldn't analyze that: {e}")
