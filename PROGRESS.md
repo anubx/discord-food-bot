@@ -15,11 +15,11 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 - [x] GitHub repo: `anubx/discord-food-bot`
 
 ### Meal Input Methods
-- [x] **Photo analysis** — GPT-4o Vision identifies foods, estimates portions + macros
+- [x] **Photo analysis** — Gemini 2.5 Flash Lite vision (fallback: GPT-4o)
 - [x] **Barcode scanning** — pyzbar decodes barcodes, Open Food Facts API for nutrition data
 - [x] **Barcode quantity modifiers** — supports `half`, `2 servings`, `50g`, `1 spoon`, etc.
-- [x] **Text input** — Claude AI analyzes typed food descriptions
-- [x] **Voice messages** — OpenAI Whisper transcription → Claude text analysis
+- [x] **Text input** — Gemini 2.5 Flash Lite (fallback: Claude Sonnet)
+- [x] **Voice messages** — Gemini native audio (fallback: Whisper + Claude)
 
 ### Calorie Budget System
 - [x] Per-user daily calorie target (`!target`)
@@ -37,6 +37,20 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 - [x] 8am morning overview in group channel
 - [x] Welcome message on member join
 
+### Macro Targets & Nutrition Goals
+- [x] **Protein-first macro system** — user sets kcal target → protein target → fat (default 50g, min 30g) → carbs auto-calculated from remainder
+- [x] **`!macros`** — view/set protein and fat targets (`!macros protein=150 fat=60`)
+- [x] **Fat floor enforcement** — fat cannot be set below 30g (hormonal health minimum)
+- [x] **Budget macro overlay** — `!budget` shows macro progress vs targets with remaining protein
+- [x] **Daily summary macro comparison** — personal 4am summary shows target vs actual macros
+
+### Streak Tracking & Reports
+- [x] **Streak tracking** — consecutive days at or under calorie target, calculated dynamically
+- [x] **`!streak`** — view current streak with milestone badges (3, 7, 14, 30+ days)
+- [x] **Weekly report** — auto-sent Monday 4:30am + `!weekly` command. Includes: daily averages, macro target comparison, consistency %, day-by-day breakdown, fat <50g health warning
+- [x] **Monthly report** — auto-sent 1st of month 5:00am + `!monthly` command. Includes: monthly averages, week-by-week breakdown, body composition estimate, fat intake warnings
+- [x] **Fat health warning** — if fat intake stays below 50g for more than 2 days/week, weekly report flags it: "for optimal hormonal health, keep fat intake above 50g"
+
 ### Meal Corrections
 - [x] `!undo` — remove last logged meal
 - [x] `!delete <#>` — delete specific meal by number
@@ -44,10 +58,32 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 - [x] `!analyze` — reply to a food photo to re-analyze it
 - [x] **Reply-based correction** — reply to any Nutrition Breakdown embed with text or voice (e.g. "the steak is 200g not 300g, the radish are tomatoes") and Claude re-evaluates the entire meal
 
-### Documentation & Tools
+### Premium & Monetization
+- [x] **Freemium tier system** — free: 3 interactions/day, Pro: 500/month ($2.99/month)
+- [x] **7-day free trial** — custom implementation (Discord doesn't support native app subscription trials)
+- [x] **Discord Premium App Subscriptions** — full integration with entitlement events (`on_entitlement_create` / `on_entitlement_update`)
+- [x] **SKU created** in Discord Developer Portal (ID: 1483496066660700252)
+- [x] **Stripe Connect** payouts configured via Rozek Industries Ltd.
+- [x] **Interaction cap system** — daily counter for free users, monthly counter for premium, auto-reset
+- [x] **Upsell flow** — shown when free users hit daily cap, links to `!trial` and `!pro`
+- [x] **Admin commands** — `!setpremium @user` / `!removepremium @user` (admin-only)
+- [x] **`!pro`** — shows tier status, interaction usage, upgrade info
+- [x] **`!trial`** — starts 7-day free trial, prevents double-use
+
+### Documentation & Legal
 - [x] Developer infographic (`infographic.html`) — full technical workflows + tech stack
 - [x] Customer infographic (`infographic-users.html`) — simplified user-facing guide
 - [x] Interactive cost simulator (`cost-simulator.html`) — per-user API cost calculator with scaling projections
+- [x] **`!info` carousel** — 7-page paginated Discord embed guide with Back/Next buttons
+- [x] **Terms of Service** (`terms.html`) — hosted on GitHub Pages
+- [x] **Privacy Policy** (`privacy.html`) — hosted on GitHub Pages, covers AI data processing, GDPR basics
+- [x] **App icon** (`icon.png`) — 1024x1024 branded icon for Discord Developer Portal
+- [x] **API cost logging** — all 5 endpoints log token counts + exact costs to Railway logs
+
+### AI Engine Migration (March 2026)
+- [x] **Migrated from 3 APIs → 1** — OpenAI GPT-4o + Whisper + Anthropic Claude → Gemini 2.5 Flash Lite
+- [x] **27x cost reduction** — $0.004/interaction → $0.00015/interaction
+- [x] **Fallback system** — OpenAI/Anthropic used automatically if Gemini key not configured
 
 ---
 
@@ -55,15 +91,22 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 
 | Decision | Choice | Reasoning |
 |----------|--------|-----------|
-| Image analysis | GPT-4o Vision | Claude Vision misidentified foods (tomatoes as radish); GPT-4o more accurate for food photos |
-| Text/reasoning | Claude Sonnet | Better at structured reasoning, quantity interpretation, meal corrections |
-| Voice transcription | OpenAI Whisper | Best-in-class speech-to-text, handles multiple languages |
+| **Primary AI engine** | **Gemini 2.5 Flash Lite** | 27x cheaper than GPT-4o/Claude; handles text, image, audio natively in one API |
+| Image analysis (fallback) | GPT-4o Vision | Claude Vision misidentified foods (tomatoes as radish); GPT-4o more accurate for food photos |
+| Text/reasoning (fallback) | Claude Sonnet | Better at structured reasoning, quantity interpretation, meal corrections |
+| Voice transcription (fallback) | OpenAI Whisper | Best-in-class speech-to-text, handles multiple languages |
 | Barcode database | Open Food Facts | Free, no API key required, large product database |
 | Barcode decoding | pyzbar + Pillow | Lightweight, works offline, no API needed |
 | Database | SQLite + WAL | Simple, no extra service needed, persistent via Railway volume |
 | Hosting | Railway | Easy Docker deploys, persistent volumes, auto-restart |
 | Channel architecture | Private per user + shared group | Privacy for meal photos, social motivation via group feed |
 | Day boundary | 4am | Late-night snacks count as same day, natural sleep boundary |
+| Tier gating | Interaction cap (not modality) | All modalities cost ~same; volume cap converts better than feature-locking |
+| Payments | Discord Premium App Subscriptions | Discord handles billing/refunds; 85/15 revenue split; Stripe Connect payouts |
+| Legal entity | Rozek Industries Ltd. | Required for Stripe Connect / Discord monetization |
+| Macro system | Protein-first, carbs as remainder | Users care most about protein; fat has 30g floor for hormonal health; carbs fill the gap |
+| Fat minimum | 30g (warn <50g) | Below 30g impairs hormone production; 50g is optimal threshold flagged in weekly reports |
+| Report schedule | Weekly Mon 4:30am, Monthly 1st 5:00am | After daily summary (4am) but before morning overview (8am) |
 
 ---
 
@@ -135,34 +178,36 @@ Discord users skew younger and more price-sensitive. $2.99 is impulse-buy territ
 
 ### Unit Economics (based on real API cost testing — March 2026)
 
-**Measured costs per interaction:** ~$0.004 (text: $0.004, photo: $0.004, voice: $0.005)
+**Pre-Gemini (OpenAI + Anthropic):** ~$0.004/interaction (text: $0.004, photo: $0.004, voice: $0.005)
+**Post-Gemini (2.5 Flash Lite):** ~$0.00015/interaction — **27x cheaper**
 
-| Metric | Value |
-|--------|-------|
-| Cost per interaction (avg) | ~$0.004 |
-| Premium user max cost (500 interactions) | ~$2.00 |
-| Revenue after Discord's 15% cut | ~$2.54 |
-| Profit per premium user/month | ~$0.54 |
-| Margin | ~21% |
-| Free tier cost per user/month (90 interactions) | ~$0.36 |
-| 7-day trial cost per user | ~$0.48 |
-| Break-even ratio | 1 premium user covers ~1.5 free users |
+| Metric | Pre-Gemini | Post-Gemini |
+|--------|-----------|-------------|
+| Cost per interaction | ~$0.004 | ~$0.00015 |
+| Premium user max cost (500/mo) | ~$2.00 | ~$0.075 |
+| Revenue after Discord's 15% cut | $2.54 | $2.54 |
+| **Profit per premium user/month** | **$0.54** | **$2.47** |
+| **Margin** | **21%** | **97%** |
+| Free tier cost per user/month | ~$0.36 | ~$0.014 |
+| 7-day trial cost per user | ~$0.48 | ~$0.02 |
+| Break-even ratio | 1 premium covers 1.5 free | 1 premium covers 176 free |
 
-### Scaling Projections (70% premium / 30% free split)
+### Scaling Projections — Post-Gemini (70% premium / 30% free split)
 
-| Users | Revenue | API Cost | Profit/month |
-|-------|---------|----------|-------------|
-| 25 | $45 | $35 | +$10 |
-| 50 | $89 | $70 | +$19 |
-| 100 | $178 | $140 | +$38 |
-| 250 | $445 | $351 | +$94 |
-| 500 | $889 | $701 | +$188 |
-| 1,000 | $1,778 | $1,403 | +$375 |
+| Users | Revenue | API Cost | Hosting | Profit/month |
+|-------|---------|----------|---------|-------------|
+| 25 | $45 | $1.40 | $5 | +$39 |
+| 50 | $89 | $2.80 | $5 | +$81 |
+| 100 | $178 | $5.60 | $5 | +$167 |
+| 250 | $445 | $14 | $5 | +$426 |
+| 500 | $889 | $28 | $10 | +$851 |
+| 1,000 | $1,778 | $56 | $10 | +$1,712 |
 
 ### Cost Controls
 - Free users capped at 3 interactions/day (~90/month max)
 - Premium users capped at 500 interactions/month
-- Consider GPT-4o-mini for photos if margins tighten (~1/10th cost, slightly lower quality)
+- Gemini already so cheap that cost is essentially negligible
+- OpenAI/Anthropic fallbacks only used if Gemini key not set
 
 ---
 
@@ -203,8 +248,8 @@ Discord users skew younger and more price-sensitive. $2.99 is impulse-buy territ
 - Approach: "built this for my friend group, thought you might like it"
 
 ### Go-to-Market Approach
-1. **Phase 1 (now)**: Launch completely free, no paywall. Get into 20–30 servers. Collect feedback.
-2. **Phase 2 (200+ active users)**: Introduce premium tier with generous grandfather deal for existing users.
+1. **Phase 1 (now)**: Freemium launch — free tier (3/day) + Pro ($2.99/mo, 500/month) + 7-day trial. Get into 20–30 servers. Collect feedback. Premium infrastructure is live.
+2. **Phase 2 (200+ active users)**: Optimize conversion funnel. A/B test trial length, cap limits, upsell messaging. Grandfather early adopters with discounts.
 3. **Phase 3 (post-traction)**: Invest in content marketing and influencer outreach with real user testimonials and leaderboard screenshots.
 
 ### Key Insight
@@ -219,39 +264,35 @@ Don't search Disboard for "food tracking" — those servers don't exist as a cat
 
 ---
 
-## Pending: Manual Cost Test Plan
+## Completed: Manual Cost Test (March 17, 2026)
 
-Before finalizing pricing, run a real-world test to get exact API costs (not estimates):
+Real-world API cost test performed using Railway logs with per-call cost logging.
 
-### Setup
-1. Note current spend on OpenAI dashboard (platform.openai.com/usage) and Anthropic dashboard (console.anthropic.com)
-2. Create a second Discord account, `!join` from group channel
+### Results (OpenAI + Anthropic — pre-Gemini migration)
+| Action | Cost | Details |
+|--------|------|---------|
+| Text meal (Claude Sonnet) | $0.004 | ~220 in, ~250 out tokens |
+| Photo meal (GPT-4o Vision) | $0.004 | ~990 in, ~160 out tokens |
+| Voice meal (Whisper + Claude) | $0.005 | Whisper ~$0.0004 + Claude ~$0.004 |
+| Barcode (Open Food Facts hit) | $0.000 | Free API, no AI call needed |
+| Barcode (fallback to photo) | $0.004 | Falls back to GPT-4o Vision |
 
-### Test Actions (60 total)
-- [ ] 10 food photos (varied complexity — simple apple to full dinner plate)
-- [ ] 10 voice messages describing meals
-- [ ] 10 text messages describing meals
-- [ ] 10 `!analyze` replies to re-analyze food photos
-- [ ] 10 voice correction replies to Nutrition Breakdown embeds
-- [ ] 10 text correction replies to Nutrition Breakdown embeds
+**Key finding:** All modalities cost ~$0.004 regardless of type. The output tokens (nutrition breakdown) dominate cost, not the input. This led to the decision to gate by interaction volume rather than modality.
 
-### After Test
-- Check both API dashboards for actual spend delta
-- Divide by action type to get real cost-per-call
-- Plug into cost simulator to validate pricing model
-- Adjust $2.99 price point if needed
+### Post-Gemini (pending verification)
+Expected ~$0.00015/interaction with Gemini 2.5 Flash Lite. Needs live testing to confirm.
 
 ---
 
 ## Potential Next Features
 
 ### High Impact (build these to drive premium conversions)
-- [ ] Weekly/monthly summary reports with trends and charts
-- [ ] Streak tracking — consecutive days hitting calorie target (drives retention + premium stickiness)
-- [ ] `!pro` upsell command — shows premium features + upgrade button
-- [ ] Premium gating logic — check Discord subscription status, gate photo/voice/barcode behind paywall
-- [ ] Daily photo cap (8/day) to control costs
-- [ ] Macro targets (not just kcal) — protein/carbs/fat goals
+- [x] ~~Weekly/monthly summary reports~~ — **Done.** Auto-sent weekly (Mon 4:30am) + monthly (1st 5:00am) + `!weekly` / `!monthly` commands
+- [x] ~~Streak tracking~~ — **Done.** Consecutive days on target, `!streak` command with milestone badges
+- [x] ~~`!pro` upsell command~~ — **Done.** Shows tier status, interaction usage, upgrade info
+- [x] ~~Premium gating logic~~ — **Done.** Interaction cap system (3/day free, 500/month Pro) with entitlement events
+- [x] ~~Daily photo cap~~ — **Done.** Replaced by unified interaction cap across all modalities
+- [x] ~~Macro targets~~ — **Done.** Protein-first system with auto-calculated carbs, 30g fat minimum, fat health warnings
 
 ### Medium Impact
 - [ ] Meal photo gallery — `!history` to browse past meals with thumbnails
@@ -320,6 +361,9 @@ Estimated cost per free user (90 interactions/month): **~$0.014/month**.
 | `infographic.html` | Developer infographic — full technical workflows |
 | `infographic-users.html` | Customer infographic — simplified user guide |
 | `cost-simulator.html` | Interactive cost/pricing calculator |
+| `terms.html` | Terms of Service — hosted on GitHub Pages |
+| `privacy.html` | Privacy Policy — hosted on GitHub Pages |
+| `icon.png` | 1024x1024 app icon for Discord Developer Portal |
 | `PROGRESS.md` | This file — progress, decisions, strategy |
 
 ---

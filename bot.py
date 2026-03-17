@@ -29,6 +29,7 @@ from google.genai import types as genai_types
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
+import calendar
 from PIL import Image
 from pyzbar.pyzbar import decode as decode_barcodes
 
@@ -99,7 +100,9 @@ def init_db():
             photo_count_today INTEGER NOT NULL DEFAULT 0,
             photo_count_day  TEXT,
             interaction_count INTEGER NOT NULL DEFAULT 0,
-            interaction_period TEXT
+            interaction_period TEXT,
+            protein_target INTEGER,
+            fat_target    INTEGER NOT NULL DEFAULT 50
         );
         CREATE TABLE IF NOT EXISTS meals (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,6 +129,8 @@ def init_db():
         "photo_count_day": "ALTER TABLE user_settings ADD COLUMN photo_count_day TEXT",
         "interaction_count": "ALTER TABLE user_settings ADD COLUMN interaction_count INTEGER NOT NULL DEFAULT 0",
         "interaction_period": "ALTER TABLE user_settings ADD COLUMN interaction_period TEXT",
+        "protein_target": "ALTER TABLE user_settings ADD COLUMN protein_target INTEGER",
+        "fat_target": "ALTER TABLE user_settings ADD COLUMN fat_target INTEGER NOT NULL DEFAULT 50",
     }
     for col, sql in migrations.items():
         if col not in existing_cols:
@@ -198,6 +203,121 @@ def set_target_kcal(user_id: str, kcal: int):
     )
     conn.commit()
     conn.close()
+
+def get_macro_targets(user_id: str) -> dict | None:
+    """Return {'kcal': int, 'protein': int|None, 'fat': int, 'carbs': int|None} or None."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT target_kcal, protein_target, fat_target FROM user_settings WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    kcal = row["target_kcal"]
+    protein = row["protein_target"]  # may be None
+    fat = row["fat_target"] or 50
+    carbs = None
+    if protein is not None:
+        # carbs = (remaining kcal after protein + fat) / 4
+        carbs_kcal = kcal - (protein * 4) - (fat * 9)
+        carbs = max(0, int(carbs_kcal / 4))
+    return {"kcal": kcal, "protein": protein, "fat": fat, "carbs": carbs}
+
+
+def set_macro_targets(user_id: str, protein: int | None = None, fat: int | None = None):
+    """Set protein and/or fat targets. Fat minimum is 30g."""
+    conn = get_db()
+    if protein is not None and fat is not None:
+        conn.execute(
+            "UPDATE user_settings SET protein_target = ?, fat_target = ? WHERE user_id = ?",
+            (protein, max(30, fat), user_id),
+        )
+    elif protein is not None:
+        conn.execute(
+            "UPDATE user_settings SET protein_target = ? WHERE user_id = ?",
+            (protein, user_id),
+        )
+    elif fat is not None:
+        conn.execute(
+            "UPDATE user_settings SET fat_target = ? WHERE user_id = ?",
+            (max(30, fat), user_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_streak(user_id: str) -> int:
+    """Count consecutive days (ending today or yesterday) where the user logged meals
+    and stayed at or under their kcal target. Returns 0 if no streak."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT target_kcal FROM user_settings WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    if not row or not row["target_kcal"]:
+        conn.close()
+        return 0
+    target = row["target_kcal"]
+
+    dt = now_tz()
+    today = get_food_day(dt)
+    streak = 0
+
+    # Check today first — if meals logged and on target, count it
+    # Then check backwards day by day
+    check_date = datetime.strptime(today, "%Y-%m-%d")
+    while True:
+        day_key = check_date.strftime("%Y-%m-%d")
+        row = conn.execute(
+            "SELECT COALESCE(SUM(kcal),0) as total, COUNT(*) as cnt "
+            "FROM meals WHERE user_id = ? AND day_key = ?",
+            (user_id, day_key),
+        ).fetchone()
+        if row["cnt"] == 0:
+            # No meals logged — streak broken (unless it's today and just not logged yet)
+            if day_key == today:
+                check_date -= timedelta(days=1)
+                continue
+            break
+        if row["total"] > target:
+            # Over target — streak broken
+            break
+        streak += 1
+        check_date -= timedelta(days=1)
+
+    conn.close()
+    return streak
+
+
+def get_period_totals(user_id: str, start_date: str, end_date: str) -> dict:
+    """Get aggregated totals for a date range (inclusive). Returns dict with
+    total_kcal, total_protein, total_carbs, total_fat, meal_count, days_logged, daily_breakdown."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(kcal),0) as total_kcal, "
+        "COALESCE(SUM(protein_g),0) as total_protein, "
+        "COALESCE(SUM(carbs_g),0) as total_carbs, "
+        "COALESCE(SUM(fat_g),0) as total_fat, "
+        "COUNT(*) as meal_count, "
+        "COUNT(DISTINCT day_key) as days_logged "
+        "FROM meals WHERE user_id = ? AND day_key >= ? AND day_key <= ?",
+        (user_id, start_date, end_date),
+    ).fetchone()
+
+    # Daily breakdown for fat warning check
+    daily_rows = conn.execute(
+        "SELECT day_key, SUM(fat_g) as day_fat, SUM(kcal) as day_kcal, "
+        "SUM(protein_g) as day_protein, SUM(carbs_g) as day_carbs "
+        "FROM meals WHERE user_id = ? AND day_key >= ? AND day_key <= ? "
+        "GROUP BY day_key ORDER BY day_key",
+        (user_id, start_date, end_date),
+    ).fetchall()
+    conn.close()
+
+    result = dict(row)
+    result["daily_breakdown"] = [dict(r) for r in daily_rows]
+    return result
+
 
 def get_user_private_channel(user_id: str) -> int | None:
     conn = get_db()
@@ -960,7 +1080,21 @@ def build_budget_text(user_id: str, day_key: str, dt: datetime) -> str:
     else:
         lines.append(f"**⚠️ {abs(remaining)} kcal over target** ({consumed} / {target} kcal)")
 
-    lines.append(f"📊 Today so far: {totals['total_protein']:.0f}g P / {totals['total_carbs']:.0f}g C / {totals['total_fat']:.0f}g F")
+    # Show macro progress with targets if set
+    macros = get_macro_targets(user_id)
+    if macros and macros["protein"] is not None:
+        p_left = macros["protein"] - totals["total_protein"]
+        f_left = macros["fat"] - totals["total_fat"]
+        c_left = macros["carbs"] - totals["total_carbs"]
+        lines.append(
+            f"📊 Macros: **{totals['total_protein']:.0f}**/{macros['protein']}g P | "
+            f"**{totals['total_fat']:.0f}**/{macros['fat']}g F | "
+            f"**{totals['total_carbs']:.0f}**/{macros['carbs']}g C"
+        )
+        if p_left > 0:
+            lines.append(f"🥩 Still need **{p_left:.0f}g protein** today")
+    else:
+        lines.append(f"📊 Today so far: {totals['total_protein']:.0f}g P / {totals['total_carbs']:.0f}g C / {totals['total_fat']:.0f}g F")
 
     if remaining > 0 and num_windows > 0:
         lines.append(f"\n📅 **Budget per remaining window** (~{per_window} kcal each):")
@@ -1031,6 +1165,10 @@ e.g. *"the steak is 200g not 300g, the radish are tomatoes"*
 `!delete <#>` — Delete a specific meal by number (see numbers with `!today`)
 `!edit <#> kcal=X protein=X` — Edit a meal's values
 `!analyze` — Reply to a food photo to (re-)analyze it
+`!macros protein=X fat=X` — Set macro targets (carbs auto-calculated)
+`!streak` — View your streak of days on target
+`!weekly` — Weekly summary report with trends
+`!monthly` — Monthly summary report
 `!leaderboard` — See today's group rankings
 `!schedule` — View the reminder schedule
 `!pro` — View Pro features and your subscription status
@@ -1217,8 +1355,27 @@ async def send_daily_summary():
         else:
             lines.append(f"Total consumed: {consumed} kcal (no target set)")
 
-        lines.append(f"\n📊 {totals['total_protein']:.0f}g P / {totals['total_carbs']:.0f}g C / {totals['total_fat']:.0f}g F")
+        # Macro targets comparison
+        user_macros = get_macro_targets(user_id)
+        if user_macros and user_macros["protein"] is not None:
+            lines.append(
+                f"\n📊 Macros: **{totals['total_protein']:.0f}**/{user_macros['protein']}g P | "
+                f"**{totals['total_fat']:.0f}**/{user_macros['fat']}g F | "
+                f"**{totals['total_carbs']:.0f}**/{user_macros['carbs']}g C"
+            )
+            if totals['total_protein'] >= user_macros['protein']:
+                lines.append("✅ Protein target hit!")
+            else:
+                lines.append(f"🥩 Missed protein target by {user_macros['protein'] - totals['total_protein']:.0f}g")
+        else:
+            lines.append(f"\n📊 {totals['total_protein']:.0f}g P / {totals['total_carbs']:.0f}g C / {totals['total_fat']:.0f}g F")
+
         lines.append(f"🍽️ {totals['meal_count']} meals logged")
+
+        # Streak
+        user_streak = get_streak(user_id)
+        if user_streak > 0:
+            lines.append(f"🔥 Current streak: **{user_streak} days**")
 
         if meals:
             lines.append("\n**Meals:**")
@@ -1299,6 +1456,24 @@ async def on_ready():
         replace_existing=True,
     )
     log.info("Scheduled morning overview at 08:00 %s", TIMEZONE)
+
+    # Monday 4:30am weekly report
+    scheduler.add_job(
+        send_weekly_reports,
+        CronTrigger(day_of_week="mon", hour=4, minute=30, timezone=TIMEZONE),
+        id="weekly_report",
+        replace_existing=True,
+    )
+    log.info("Scheduled weekly report at Monday 04:30 %s", TIMEZONE)
+
+    # 1st of month 5:00am monthly report
+    scheduler.add_job(
+        send_monthly_reports,
+        CronTrigger(day=1, hour=5, minute=0, timezone=TIMEZONE),
+        id="monthly_report",
+        replace_existing=True,
+    )
+    log.info("Scheduled monthly report at 1st of month 05:00 %s", TIMEZONE)
 
     scheduler.start()
 
@@ -1781,8 +1956,15 @@ async def cmd_target(ctx: commands.Context, kcal: int = None):
     user_id = str(ctx.author.id)
     if kcal is None:
         current = get_target_kcal(user_id)
+        macros = get_macro_targets(user_id)
         if current:
-            await ctx.reply(f"🎯 Your daily target is **{current} kcal**. Use `!target <number>` to change it.")
+            lines = [f"🎯 Your daily target is **{current} kcal**."]
+            if macros and macros["protein"] is not None:
+                lines.append(f"🥩 Protein: **{macros['protein']}g** | 🧈 Fat: **{macros['fat']}g** | 🍞 Carbs: **{macros['carbs']}g** (auto)")
+            else:
+                lines.append("💡 Set macro targets with `!macros protein=150` (fat defaults to 50g, carbs auto-calculated).")
+            lines.append("\nUse `!target <number>` to change kcal, `!macros` to adjust protein/fat.")
+            await ctx.reply("\n".join(lines))
         else:
             await ctx.reply("No target set yet. Use `!target <number>` to set your daily calorie goal.")
         return
@@ -1792,7 +1974,20 @@ async def cmd_target(ctx: commands.Context, kcal: int = None):
         return
 
     set_target_kcal(user_id, kcal)
-    await ctx.reply(f"✅ Daily calorie target set to **{kcal} kcal**.")
+    macros = get_macro_targets(user_id)
+    if macros and macros["protein"] is not None:
+        # Recalculate carbs with new kcal
+        carbs_kcal = kcal - (macros["protein"] * 4) - (macros["fat"] * 9)
+        carbs = max(0, int(carbs_kcal / 4))
+        await ctx.reply(
+            f"✅ Daily calorie target set to **{kcal} kcal**.\n"
+            f"🥩 Protein: **{macros['protein']}g** | 🧈 Fat: **{macros['fat']}g** | 🍞 Carbs: **{carbs}g** (auto-calculated)"
+        )
+    else:
+        await ctx.reply(
+            f"✅ Daily calorie target set to **{kcal} kcal**.\n"
+            f"💡 Now set your protein goal: `!macros protein=150`"
+        )
 
 
 @bot.command(name="budget")
@@ -2133,15 +2328,18 @@ INFO_PAGES = [
         description=(
             "`!join` — Create your private channel\n"
             "`!target 2000` — Set daily calorie goal\n"
-            "`!budget` — Remaining kcal for today\n"
+            "`!macros protein=150` — Set macro targets\n"
+            "`!budget` — Remaining kcal + macros for today\n"
             "`!today` — See all meals logged today\n"
+            "`!streak` — View your target streak\n"
+            "`!weekly` — Weekly summary report\n"
+            "`!monthly` — Monthly summary report\n"
             "`!undo` — Remove last meal\n"
             "`!delete 2` — Delete a specific meal\n"
             "`!edit 2 kcal=400` — Manually fix values\n"
             "`!leaderboard` — Today's group rankings\n"
             "`!pro` — View Pro features & status\n"
             "`!trial` — Start a free 7-day Pro trial\n"
-            "`!schedule` — View reminder times\n"
             "`!info` — This guide!"
         ),
         color=0x8b5cf6,
@@ -2280,6 +2478,416 @@ async def cmd_removepremium(ctx: commands.Context, member: discord.Member = None
         return
     set_premium(str(member.id), False)
     await ctx.reply(f"🔒 **{member.display_name}** has been removed from FoodTracker Pro.")
+
+
+@bot.command(name="macros")
+async def cmd_macros(ctx: commands.Context, *, values: str = None):
+    """Set or view your macro targets. Usage: !macros protein=150 fat=60"""
+    user_id = str(ctx.author.id)
+    macros = get_macro_targets(user_id)
+
+    if values is None:
+        # Show current macro targets
+        if not macros:
+            await ctx.reply("Set your calorie target first with `!target <kcal>`, then `!macros protein=150`.")
+            return
+        if macros["protein"] is None:
+            await ctx.reply(
+                f"🎯 Calories: **{macros['kcal']} kcal** | 🧈 Fat: **{macros['fat']}g** (default)\n\n"
+                f"Set your protein target: `!macros protein=150`\n"
+                f"Carbs will be auto-calculated from the remainder."
+            )
+        else:
+            await ctx.reply(
+                f"🎯 **Daily Macro Targets**\n"
+                f"Calories: **{macros['kcal']} kcal**\n"
+                f"🥩 Protein: **{macros['protein']}g** ({macros['protein'] * 4} kcal)\n"
+                f"🧈 Fat: **{macros['fat']}g** ({macros['fat'] * 9} kcal)\n"
+                f"🍞 Carbs: **{macros['carbs']}g** ({macros['carbs'] * 4} kcal) — auto-calculated\n\n"
+                f"Adjust: `!macros protein=X fat=X`"
+            )
+        return
+
+    if not macros:
+        await ctx.reply("Set your calorie target first with `!target <kcal>`.")
+        return
+
+    # Parse key=value pairs
+    new_protein = None
+    new_fat = None
+    for pair in values.split():
+        if "=" not in pair:
+            continue
+        key, val = pair.split("=", 1)
+        try:
+            num = int(val)
+        except ValueError:
+            await ctx.reply(f"Invalid value for `{key}`: `{val}`. Use a whole number.")
+            return
+        key = key.lower().strip()
+        if key in ("protein", "p"):
+            if num < 0 or num > 500:
+                await ctx.reply("Protein target must be between 0 and 500g.")
+                return
+            new_protein = num
+        elif key in ("fat", "f"):
+            if num < 30:
+                await ctx.reply("⚠️ Fat cannot be set below **30g** — this is the minimum for hormonal health. Setting to 30g.")
+                num = 30
+            if num > 300:
+                await ctx.reply("Fat target must be 300g or less.")
+                return
+            new_fat = num
+        else:
+            await ctx.reply(f"Unknown macro: `{key}`. Use: `protein` (or `p`), `fat` (or `f`). Carbs are auto-calculated.")
+            return
+
+    if new_protein is None and new_fat is None:
+        await ctx.reply("Usage: `!macros protein=150` or `!macros protein=150 fat=60`")
+        return
+
+    set_macro_targets(user_id, protein=new_protein, fat=new_fat)
+
+    # Show updated values
+    updated = get_macro_targets(user_id)
+    if updated["protein"] is not None:
+        await ctx.reply(
+            f"✅ **Macro targets updated!**\n"
+            f"🥩 Protein: **{updated['protein']}g** ({updated['protein'] * 4} kcal)\n"
+            f"🧈 Fat: **{updated['fat']}g** ({updated['fat'] * 9} kcal)\n"
+            f"🍞 Carbs: **{updated['carbs']}g** ({updated['carbs'] * 4} kcal) — auto-calculated\n"
+            f"🎯 Total: **{updated['kcal']} kcal**"
+        )
+    else:
+        await ctx.reply(f"✅ Fat target set to **{updated['fat']}g**. Set protein with `!macros protein=150`.")
+
+
+@bot.command(name="streak")
+async def cmd_streak(ctx: commands.Context):
+    """Show your current streak of days hitting your calorie target."""
+    user_id = str(ctx.author.id)
+    streak = get_streak(user_id)
+
+    if streak == 0:
+        await ctx.reply("🔥 No active streak yet. Log meals and stay within your calorie target to start building one!")
+    elif streak == 1:
+        await ctx.reply("🔥 **1 day** streak! You hit your target yesterday. Keep it going today!")
+    else:
+        # Fun milestones
+        if streak >= 30:
+            badge = "🏆💎"
+            msg = "Incredible discipline!"
+        elif streak >= 14:
+            badge = "🏆🔥"
+            msg = "Two weeks strong!"
+        elif streak >= 7:
+            badge = "⭐🔥"
+            msg = "One full week!"
+        elif streak >= 3:
+            badge = "🔥"
+            msg = "Building momentum!"
+        else:
+            badge = "🔥"
+            msg = "Keep going!"
+        await ctx.reply(f"{badge} **{streak}-day streak!** {msg}")
+
+
+# ---------------------------------------------------------------------------
+# Weekly & Monthly summary reports
+# ---------------------------------------------------------------------------
+def build_weekly_report(user_id: str, end_date: str | None = None) -> discord.Embed | None:
+    """Build a weekly report embed for a user. end_date defaults to yesterday."""
+    dt = now_tz()
+    if end_date is None:
+        end_dt = datetime.strptime(get_food_day(dt), "%Y-%m-%d") - timedelta(days=1)
+    else:
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    start_dt = end_dt - timedelta(days=6)
+    start = start_dt.strftime("%Y-%m-%d")
+    end = end_dt.strftime("%Y-%m-%d")
+
+    totals = get_period_totals(user_id, start, end)
+    if totals["meal_count"] == 0:
+        return None
+
+    macros = get_macro_targets(user_id)
+    target = macros["kcal"] if macros else 2000
+    days_logged = totals["days_logged"]
+    daily_breakdown = totals["daily_breakdown"]
+
+    # Averages
+    avg_kcal = totals["total_kcal"] / days_logged if days_logged else 0
+    avg_protein = totals["total_protein"] / days_logged if days_logged else 0
+    avg_carbs = totals["total_carbs"] / days_logged if days_logged else 0
+    avg_fat = totals["total_fat"] / days_logged if days_logged else 0
+
+    # Days on target
+    days_on_target = sum(1 for d in daily_breakdown if d["day_kcal"] <= target)
+
+    # Streak
+    streak = get_streak(user_id)
+
+    # Fat warning: days below 50g
+    low_fat_days = sum(1 for d in daily_breakdown if d["day_fat"] < 50)
+
+    # Net deficit/surplus for the week
+    total_target = target * days_logged
+    net_diff = total_target - totals["total_kcal"]
+    fat_change_g = (net_diff / 7700) * 1000
+
+    lines = [
+        f"📅 **{start}** to **{end}** ({days_logged} days logged)\n",
+        f"**📊 Weekly Averages (per day)**",
+        f"🎯 Calories: **{avg_kcal:.0f}** / {target} kcal",
+        f"🥩 Protein: **{avg_protein:.0f}g**",
+        f"🧈 Fat: **{avg_fat:.0f}g**",
+        f"🍞 Carbs: **{avg_carbs:.0f}g**\n",
+    ]
+
+    # Macro target comparison
+    if macros and macros["protein"] is not None:
+        lines.append("**🎯 Macro Targets vs Actual**")
+        p_diff = avg_protein - macros["protein"]
+        f_diff = avg_fat - macros["fat"]
+        c_diff = avg_carbs - macros["carbs"]
+        p_emoji = "✅" if abs(p_diff) <= 15 else ("⬆️" if p_diff > 0 else "⬇️")
+        f_emoji = "✅" if abs(f_diff) <= 10 else ("⬆️" if f_diff > 0 else "⬇️")
+        c_emoji = "✅" if abs(c_diff) <= 20 else ("⬆️" if c_diff > 0 else "⬇️")
+        lines.append(f"  {p_emoji} Protein: {avg_protein:.0f}g / {macros['protein']}g target")
+        lines.append(f"  {f_emoji} Fat: {avg_fat:.0f}g / {macros['fat']}g target")
+        lines.append(f"  {c_emoji} Carbs: {avg_carbs:.0f}g / {macros['carbs']}g target")
+        lines.append("")
+
+    # Consistency
+    lines.append("**📈 Consistency**")
+    lines.append(f"  ✅ Days on target: **{days_on_target}/{days_logged}**")
+    lines.append(f"  🍽️ Total meals: **{totals['meal_count']}** ({totals['meal_count']/days_logged:.1f}/day avg)")
+    if streak > 0:
+        lines.append(f"  🔥 Current streak: **{streak} days**")
+    lines.append("")
+
+    # Body composition
+    if net_diff > 0:
+        lines.append(f"**🔥 Weekly deficit: {net_diff:.0f} kcal** → ~{fat_change_g:.0f}g body fat lost")
+    elif net_diff < 0:
+        lines.append(f"**📈 Weekly surplus: {abs(net_diff):.0f} kcal** → ~{abs(fat_change_g):.0f}g potential fat gain")
+    else:
+        lines.append("**⚖️ Maintenance week** — calories in = calories out")
+
+    # Fat warning
+    if low_fat_days > 2:
+        lines.append(
+            f"\n⚠️ **Hormonal health warning:** Your fat intake was below 50g on **{low_fat_days} days** this week. "
+            f"For optimal hormonal health, keep fat intake above 50g daily. Adjust with `!macros fat=50`."
+        )
+
+    # Day-by-day breakdown
+    lines.append("\n**📋 Day-by-Day**")
+    for d in daily_breakdown:
+        day_dt = datetime.strptime(d["day_key"], "%Y-%m-%d")
+        day_name = day_dt.strftime("%a")
+        on_target = "✅" if d["day_kcal"] <= target else "⚠️"
+        lines.append(f"  {on_target} {day_name} {d['day_key']}: {d['day_kcal']:.0f} kcal | {d['day_protein']:.0f}P / {d['day_carbs']:.0f}C / {d['day_fat']:.0f}F")
+
+    embed = discord.Embed(
+        title="📊  Weekly Report",
+        description="\n".join(lines),
+        color=discord.Color.blue(),
+        timestamp=dt,
+    )
+    return embed
+
+
+def build_monthly_report(user_id: str, year: int = None, month: int = None) -> discord.Embed | None:
+    """Build a monthly report embed for a user."""
+    dt = now_tz()
+    if year is None or month is None:
+        # Default to previous month
+        first_of_this_month = dt.replace(day=1)
+        last_month_end = first_of_this_month - timedelta(days=1)
+        year = last_month_end.year
+        month = last_month_end.month
+
+    _, last_day = calendar.monthrange(year, month)
+    start = f"{year:04d}-{month:02d}-01"
+    end = f"{year:04d}-{month:02d}-{last_day:02d}"
+
+    totals = get_period_totals(user_id, start, end)
+    if totals["meal_count"] == 0:
+        return None
+
+    macros = get_macro_targets(user_id)
+    target = macros["kcal"] if macros else 2000
+    days_logged = totals["days_logged"]
+    daily_breakdown = totals["daily_breakdown"]
+
+    # Averages
+    avg_kcal = totals["total_kcal"] / days_logged if days_logged else 0
+    avg_protein = totals["total_protein"] / days_logged if days_logged else 0
+    avg_carbs = totals["total_carbs"] / days_logged if days_logged else 0
+    avg_fat = totals["total_fat"] / days_logged if days_logged else 0
+
+    # Days on target
+    days_on_target = sum(1 for d in daily_breakdown if d["day_kcal"] <= target)
+
+    # Streak
+    streak = get_streak(user_id)
+
+    # Fat warning
+    low_fat_days = sum(1 for d in daily_breakdown if d["day_fat"] < 50)
+    low_fat_weeks = low_fat_days  # total days, we'll report it overall
+
+    # Net diff
+    total_target = target * days_logged
+    net_diff = total_target - totals["total_kcal"]
+    fat_change_g = (net_diff / 7700) * 1000
+
+    month_name = calendar.month_name[month]
+    lines = [
+        f"📅 **{month_name} {year}** ({days_logged} days logged)\n",
+        f"**📊 Monthly Averages (per day)**",
+        f"🎯 Calories: **{avg_kcal:.0f}** / {target} kcal",
+        f"🥩 Protein: **{avg_protein:.0f}g**",
+        f"🧈 Fat: **{avg_fat:.0f}g**",
+        f"🍞 Carbs: **{avg_carbs:.0f}g**\n",
+    ]
+
+    # Macro targets
+    if macros and macros["protein"] is not None:
+        lines.append("**🎯 Macro Targets vs Actual**")
+        p_diff = avg_protein - macros["protein"]
+        f_diff = avg_fat - macros["fat"]
+        c_diff = avg_carbs - macros["carbs"]
+        p_emoji = "✅" if abs(p_diff) <= 15 else ("⬆️" if p_diff > 0 else "⬇️")
+        f_emoji = "✅" if abs(f_diff) <= 10 else ("⬆️" if f_diff > 0 else "⬇️")
+        c_emoji = "✅" if abs(c_diff) <= 20 else ("⬆️" if c_diff > 0 else "⬇️")
+        lines.append(f"  {p_emoji} Protein: {avg_protein:.0f}g / {macros['protein']}g target")
+        lines.append(f"  {f_emoji} Fat: {avg_fat:.0f}g / {macros['fat']}g target")
+        lines.append(f"  {c_emoji} Carbs: {avg_carbs:.0f}g / {macros['carbs']}g target")
+        lines.append("")
+
+    lines.append("**📈 Consistency**")
+    lines.append(f"  ✅ Days on target: **{days_on_target}/{days_logged}** ({days_on_target/days_logged*100:.0f}%)")
+    lines.append(f"  🍽️ Total meals: **{totals['meal_count']}** ({totals['meal_count']/days_logged:.1f}/day avg)")
+    if streak > 0:
+        lines.append(f"  🔥 Current streak: **{streak} days**")
+    lines.append("")
+
+    # Body composition
+    if net_diff > 0:
+        lines.append(f"**🔥 Monthly deficit: {net_diff:.0f} kcal** → ~{fat_change_g:.0f}g body fat lost (~{fat_change_g/1000:.2f} kg)")
+    elif net_diff < 0:
+        lines.append(f"**📈 Monthly surplus: {abs(net_diff):.0f} kcal** → ~{abs(fat_change_g):.0f}g potential fat gain (~{abs(fat_change_g)/1000:.2f} kg)")
+    else:
+        lines.append("**⚖️ Maintenance month** — calories in = calories out")
+
+    # Fat warning
+    if low_fat_days > 8:  # more than 2/week across the month
+        lines.append(
+            f"\n⚠️ **Hormonal health warning:** Your fat intake was below 50g on **{low_fat_days} days** this month. "
+            f"For optimal hormonal health, keep fat intake above 50g daily."
+        )
+
+    # Weekly breakdown
+    lines.append("\n**📋 Week-by-Week**")
+    week_num = 1
+    for i in range(0, len(daily_breakdown), 7):
+        week_days = daily_breakdown[i:i+7]
+        w_kcal = sum(d["day_kcal"] for d in week_days) / len(week_days)
+        w_protein = sum(d["day_protein"] for d in week_days) / len(week_days)
+        w_on_target = sum(1 for d in week_days if d["day_kcal"] <= target)
+        lines.append(f"  Week {week_num}: avg {w_kcal:.0f} kcal | {w_protein:.0f}g P | {w_on_target}/{len(week_days)} on target")
+        week_num += 1
+
+    embed = discord.Embed(
+        title=f"📊  Monthly Report — {month_name} {year}",
+        description="\n".join(lines),
+        color=discord.Color.purple(),
+        timestamp=dt,
+    )
+    return embed
+
+
+async def send_weekly_reports():
+    """Monday 4:30am: send weekly reports to all users."""
+    users = get_all_users()
+    dt = now_tz()
+    for u in users:
+        ch_id = u.get("private_channel")
+        if not ch_id:
+            continue
+        channel = bot.get_channel(ch_id)
+        if not channel:
+            continue
+        embed = build_weekly_report(u["user_id"])
+        if embed:
+            try:
+                await channel.send(embed=embed)
+            except Exception as e:
+                log.warning("Failed to send weekly report to %s: %s", ch_id, e)
+    log.info("Sent weekly reports to %d users", len(users))
+
+
+async def send_monthly_reports():
+    """1st of month 5:00am: send monthly reports for previous month."""
+    users = get_all_users()
+    dt = now_tz()
+    # Previous month
+    first_of_this_month = dt.replace(day=1)
+    last_month_end = first_of_this_month - timedelta(days=1)
+    year = last_month_end.year
+    month = last_month_end.month
+
+    for u in users:
+        ch_id = u.get("private_channel")
+        if not ch_id:
+            continue
+        channel = bot.get_channel(ch_id)
+        if not channel:
+            continue
+        embed = build_monthly_report(u["user_id"], year, month)
+        if embed:
+            try:
+                await channel.send(embed=embed)
+            except Exception as e:
+                log.warning("Failed to send monthly report to %s: %s", ch_id, e)
+    log.info("Sent monthly reports for %d-%02d to %d users", year, month, len(users))
+
+
+@bot.command(name="weekly")
+async def cmd_weekly(ctx: commands.Context):
+    """Show your weekly summary report."""
+    user_id = str(ctx.author.id)
+    embed = build_weekly_report(user_id)
+    if embed:
+        await ctx.reply(embed=embed)
+    else:
+        await ctx.reply("No meals logged in the past 7 days.")
+
+
+@bot.command(name="monthly")
+async def cmd_monthly(ctx: commands.Context):
+    """Show your monthly summary report (current month so far)."""
+    user_id = str(ctx.author.id)
+    dt = now_tz()
+    # Show current month so far
+    year = dt.year
+    month = dt.month
+    today = get_food_day(dt)
+    start = f"{year:04d}-{month:02d}-01"
+
+    totals = get_period_totals(user_id, start, today)
+    if totals["meal_count"] == 0:
+        await ctx.reply("No meals logged this month yet.")
+        return
+
+    # Build current month report
+    embed = build_monthly_report(user_id, year, month)
+    if embed:
+        embed.title = f"📊  Monthly Report — {dt.strftime('%B %Y')} (so far)"
+        await ctx.reply(embed=embed)
+    else:
+        await ctx.reply("No meals logged this month yet.")
 
 
 # ---------------------------------------------------------------------------
