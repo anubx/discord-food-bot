@@ -91,9 +91,10 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 - [x] **Stripe Connect** payouts configured via Rozek Industries Ltd.
 - [x] **Interaction cap system** — daily counter for free users, monthly counter for premium, auto-reset
 - [x] **Upsell flow** — shown when free users hit daily cap, links to `!trial` and `!pro`
-- [x] **Admin commands** — `!setpremium @user` / `!removepremium @user` (admin-only)
-- [x] **`!pro`** — shows tier status, interaction usage, upgrade info
-- [x] **`!trial`** — starts 7-day free trial, prevents double-use
+- [x] **Admin commands** — `!setpremium @user` / `!removepremium @user` / `!migrate` (admin-only)
+- [x] **`!pro`** — shows tier status, interaction usage, upgrade info, cancellation instructions
+- [x] **`!trial`** — starts 7-day free trial, auto-expires (no cancellation needed)
+- [x] **Subscription cancellation** — handled by Discord (Settings → Subscriptions); bot deactivates Pro via `on_entitlement_update` event
 
 ### Body Fat Tracking (Opt-in, GDPR-compliant)
 - [x] **Navy method calculation** — pure Python, no AI involved (height, waist, neck, hip → BF%)
@@ -165,6 +166,99 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 | Bot not responding to photos | FoodTracker role missing from channel | Added bot with View/Send/Read/Embed permissions |
 | PrivilegedIntentsRequired crash | Server Members Intent not enabled | Toggled on in Developer Portal |
 | Bash `!` in double quotes | History expansion in commit messages | Used single quotes for git commit |
+| Admin could see user health data | Private channels visible to server admin | Refactored to DM-based architecture — admin physically cannot read DMs |
+| Trial cancellation confusion | Users didn't know if they need to cancel trial | Trial auto-expires after 7 days, no action needed. Added info to `!pro` output |
+| Subscription cancellation | Users didn't know how to cancel Pro | Discord handles it: Settings → Subscriptions. Added info to `!pro` output |
+| Existing user migration | Old users had private channels, new architecture uses DMs | Added `!migrate` admin command — DMs all users explaining the switch |
+
+---
+
+## Privacy & Compliance Strategy
+
+### Health Data Classification
+
+Weight, body fat percentages, calorie tracking, and nutritional data are classified as **health data** — a special category under multiple jurisdictions:
+
+- **GDPR Article 9 (EU/EEA)** — "special category personal data" requiring explicit consent (Art. 9(2)(a))
+- **CCPA/CPRA (California)** — "sensitive personal information" with right to limit use, deletion, and opt-in
+- **CMIA (California)** — narrower; applies to healthcare providers/insurers, not general apps. CPRA is the relevant law for us
+- **PIPEDA (Canada)** — "sensitive personal information" requiring explicit (not implied, not bundled) consent, purpose limitation, named privacy officer (can be the operator), 30-day response to access/correction requests
+- **Swiss FADP (revised 2023)** — "sensitive personal data" requiring explicit consent, 72h breach notification to FDPIC, fines on *individuals* up to CHF 250,000 (not just companies)
+- **HIPAA (US)** — does **not** apply to us. Only covers "covered entities" (healthcare providers, health plans, clearinghouses) and "business associates." A Discord bot is not a covered entity unless partnering with a provider. Worth designing as-if for future-proofing
+
+### Architecture Decisions for Compliance
+
+| Decision | Implementation | Why |
+|----------|---------------|-----|
+| DM-based tracking | All health data exchanged in private Discord DMs only | Server admin cannot see user health data — genuine privacy, not policy-based |
+| Body fat calculated locally | Navy method formula in pure Python on our server | Body measurements never sent to Gemini or any third party |
+| Data minimization | Only BF% stored; height/waist/neck/hip discarded after calculation | Minimize health data retention per GDPR Art. 5(1)(c) |
+| Explicit opt-in | `!bodyfat setup` → explanation → `!bodyfat confirm` to consent | GDPR Art. 9(2)(a), CPRA, PIPEDA, FADP all require explicit consent for health data |
+| Self-service deletion | `!deletedata` command with two-step confirm | Instant erasure — no 30-day wait. Covers GDPR Art. 17, CCPA, PIPEDA, FADP |
+| Selective deletion | `!bodyfat delete` revokes consent + deletes BF data only | Users can delete health subcategory without wiping all data |
+| EU data residency | Railway EU region (Amsterdam/Frankfurt) | No cross-border transfer issues for primary data; simplest GDPR compliance |
+
+### Data Processing Agreements (DPAs)
+
+At our current scale (SQLite on Railway, single operator), the DPA landscape is:
+
+| Processor | DPA Status | Action Required |
+|-----------|-----------|-----------------|
+| **Google (Gemini API)** | Available via Google Cloud Console | ✅ Accept DPA in Cloud Console settings (5 min checkbox) |
+| **Railway (hosting)** | Covered under ToS; formal DPA available on request | ⚠️ Email Railway support to request explicit DPA |
+| **Discord (message transport)** | Discord Developer DPA for verified apps | ⚠️ Request when app is verified |
+| **OpenAI (fallback)** | Available via OpenAI dashboard | Accept if using fallback |
+| **Anthropic (fallback)** | Available via Anthropic console | Accept if using fallback |
+| **Operator (self)** | N/A — you are both controller and processor | No DPA with yourself |
+
+**Key insight:** Body fat measurements never touch any third party. The Navy method calculation is local Python math on the Railway EU server. DPA obligations only apply to the meal analysis flow (food photos/text → Gemini API).
+
+### Server Location
+
+Railway runs on GCP infrastructure. Deploy to **EU region** (`eu-west`) for simplest compliance:
+
+- GDPR: data stays in EU, no transfer mechanism needed
+- Swiss FADP: EU adequacy recognized, no issues
+- CCPA/CPRA: no geographic restriction, EU is fine
+- PIPEDA: disclose non-Canadian storage location in privacy policy (done)
+
+If Railway is currently on US region → redeploy to EU (config change, no code change). Confirm in Railway project settings.
+
+### Breach Notification Requirements
+
+| Jurisdiction | Timeframe | Notify |
+|-------------|-----------|--------|
+| GDPR | 72 hours | Supervisory authority (DPA) + affected individuals if high risk |
+| Swiss FADP | 72 hours | FDPIC (Swiss DPA) + affected individuals |
+| CCPA/CPRA | "Most expedient time possible" | Affected California residents |
+| PIPEDA | "As soon as feasible" | Privacy Commissioner of Canada + affected individuals |
+
+### What's Covered vs What's Needed
+
+**Already implemented:**
+- [x] Explicit opt-in consent for body fat (special category health data)
+- [x] Right to deletion via `!deletedata` (instant, self-service)
+- [x] Selective body fat deletion via `!bodyfat delete`
+- [x] Data minimization (raw measurements discarded, only BF% stored)
+- [x] Local body fat calculation (no third-party processing)
+- [x] DM-based architecture (admin cannot access health data)
+- [x] Privacy policy v2 covering all jurisdictions
+- [x] EU data residency intent (Railway EU region)
+- [x] Legal basis documented (consent for Art. 9, legitimate interest for core features)
+
+**Action items (manual, not code):**
+- [ ] Accept Google Cloud DPA in console settings
+- [ ] Email Railway for formal DPA
+- [ ] Confirm Railway service is on EU region — redeploy if on US
+- [ ] Request Discord Developer DPA when app is verified
+- [ ] Designate privacy officer (can be the operator) for PIPEDA compliance
+- [ ] Create breach notification procedure document (who to contact, within what timeframe)
+
+### iOS/Android Native App — Not Recommended
+
+Evaluated wrapping the Discord bot in a native iOS/Android app. **Recommendation: don't.**
+
+Reasons: the bot already works natively in the Discord mobile app (iOS + Android), which handles push notifications, camera, voice, and photo uploads. A native wrapper would require: App Store / Play Store review (health app category triggers extra scrutiny), Apple/Google's 30% commission on subscriptions (vs Discord's 15%), separate payment infrastructure, maintaining two codebases, and health data compliance for mobile app stores (stricter than Discord's platform). The Discord-native approach gives you mobile for free.
 
 ---
 
