@@ -230,6 +230,30 @@ def get_day_meals(user_id: str, day_key: str) -> list[dict]:
     conn.close()
     return [dict(r) for r in rows]
 
+def get_last_meal(user_id: str, day_key: str) -> dict | None:
+    """Get the most recent meal for a user on a given day."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM meals WHERE user_id = ? AND day_key = ? ORDER BY timestamp DESC LIMIT 1",
+        (user_id, day_key),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def update_meal_full(meal_id: int, user_id: str, kcal: int, protein: float,
+                     carbs: float, fat: float, description: str, raw_analysis: str) -> bool:
+    """Update a meal's nutrition values and analysis text. Returns True if updated."""
+    conn = get_db()
+    cursor = conn.execute(
+        "UPDATE meals SET kcal = ?, protein_g = ?, carbs_g = ?, fat_g = ?, description = ?, raw_analysis = ? "
+        "WHERE id = ? AND user_id = ?",
+        (kcal, protein, carbs, fat, description, raw_analysis, meal_id, user_id),
+    )
+    conn.commit()
+    updated = cursor.rowcount > 0
+    conn.close()
+    return updated
+
 def delete_meal(meal_id: int, user_id: str) -> bool:
     """Delete a meal by ID. Returns True if deleted."""
     conn = get_db()
@@ -383,6 +407,51 @@ async def analyze_food_text(description: str) -> str:
             {
                 "role": "user",
                 "content": f"I ate: {description}\n\nEstimate macros (protein, carbs, fat) and total calories.",
+            }
+        ],
+    )
+    return message.content[0].text
+
+
+CORRECTION_SYSTEM_PROMPT = """You are a nutrition analysis assistant. The user previously received a meal analysis but wants to correct it.
+You will be given:
+1. The ORIGINAL analysis (what the bot previously said)
+2. The user's CORRECTIONS (what they want to change)
+
+Apply the user's corrections to the original analysis. For example:
+- If they say "the steak is 200g not 300g", recalculate macros for a 200g steak
+- If they say "the radish are tomatoes", replace radish with tomatoes and adjust macros
+- If they say "the bread is corn", replace bread with corn and adjust macros
+- If they say "remove the rice", remove that item entirely
+
+Provide the corrected full analysis with:
+1. **Corrected foods** — updated list
+2. **Estimated macros per item** (protein, carbs, fat in grams)
+3. **Estimated calories per item**
+4. **Meal totals** — updated sum of protein, carbs, fat, and total kcal
+
+Be concise. Use a clean table format.
+
+IMPORTANT: At the very end of your response, include a single line in this exact format:
+$$TOTALS: kcal=NUMBER, protein=NUMBER, carbs=NUMBER, fat=NUMBER$$
+
+This line must contain only integers (no decimals). This is used for automated tracking."""
+
+
+async def reevaluate_meal(original_analysis: str, corrections: str) -> str:
+    """Send original analysis + user corrections to Claude and return updated breakdown."""
+    message = claude.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        system=CORRECTION_SYSTEM_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    f"ORIGINAL ANALYSIS:\n{original_analysis}\n\n"
+                    f"MY CORRECTIONS:\n{corrections}\n\n"
+                    "Please apply my corrections and provide the updated nutrition breakdown."
+                ),
             }
         ],
     )
@@ -669,6 +738,10 @@ Log meals in your private channel using any of these methods:
 🎤 **Voice** — send a voice message describing your meal
 
 The bot analyzes everything for macros and calories automatically.
+
+**Corrections:**
+Reply to any nutrition breakdown with text or voice to correct it!
+e.g. *"the steak is 200g not 300g, the radish are tomatoes"*
 
 **Commands:**
 `!join` — Create your private food tracking channel
@@ -980,6 +1053,20 @@ async def on_message(message: discord.Message):
             await bot.process_commands(message)
             return
 
+        # --- REPLY-BASED CORRECTION ---
+        # If user replies to a bot's Nutrition Breakdown embed, treat as correction
+        if message.reference and message.reference.resolved:
+            ref_msg = message.reference.resolved
+            is_correction = (
+                ref_msg.author == bot.user
+                and ref_msg.embeds
+                and any("Nutrition Breakdown" in (e.title or "") for e in ref_msg.embeds)
+            )
+            if is_correction:
+                await _handle_correction(message)
+                await bot.process_commands(message)
+                return
+
         # Determine input type
         image_attachments = []
         audio_attachments = []
@@ -1156,6 +1243,103 @@ async def _process_meal_analysis(
         if thumbnail_url:
             group_embed.set_thumbnail(url=thumbnail_url)
         await group_channel.send(embed=group_embed)
+
+
+async def _handle_correction(message: discord.Message):
+    """Handle a reply-based correction to a previous meal analysis."""
+    user_id = str(message.author.id)
+    dt = now_tz()
+    day_key = get_food_day(dt)
+
+    # Get correction text from text or voice
+    correction_text = ""
+    audio_attachments = [
+        a for a in message.attachments
+        if any(a.filename.lower().endswith(ext) for ext in (".ogg", ".mp3", ".wav", ".m4a", ".mp4", ".webm"))
+    ]
+
+    if audio_attachments:
+        # Transcribe voice correction
+        async with message.channel.typing():
+            try:
+                audio_bytes = await audio_attachments[0].read()
+                correction_text = await transcribe_audio(audio_bytes, audio_attachments[0].filename)
+                await message.reply(f"🎤 *\"{correction_text}\"*")
+            except Exception as e:
+                log.exception("Error transcribing correction audio")
+                await message.reply(f"⚠️ Couldn't transcribe voice message: {e}")
+                return
+    elif message.content.strip():
+        correction_text = message.content.strip()
+    else:
+        await message.reply("Please include your corrections as text or a voice message when replying to a meal analysis.")
+        return
+
+    log.info("Correction from %s: %s", message.author, correction_text[:80])
+
+    # Find the most recent meal to correct
+    last_meal = get_last_meal(user_id, day_key)
+    if not last_meal:
+        # Try yesterday (in case near day boundary)
+        prev_day = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        last_meal = get_last_meal(user_id, prev_day)
+
+    if not last_meal:
+        await message.reply("⚠️ No recent meal found to correct. Log a meal first!")
+        return
+
+    original_analysis = last_meal.get("raw_analysis", "")
+    if not original_analysis:
+        await message.reply("⚠️ No original analysis data found for the last meal. Try `!edit` instead.")
+        return
+
+    # Send to Claude for re-evaluation
+    async with message.channel.typing():
+        try:
+            updated_analysis = await reevaluate_meal(original_analysis, correction_text)
+            parsed = parse_totals(updated_analysis)
+            display_text = strip_totals_line(updated_analysis)
+
+            # Update the meal in the database
+            old_kcal = last_meal["kcal"]
+            meal_desc = last_meal.get("description", "")
+            updated = update_meal_full(
+                last_meal["id"], user_id,
+                parsed["kcal"], parsed["protein"], parsed["carbs"], parsed["fat"],
+                f"{meal_desc} (corrected: {correction_text[:100]})",
+                updated_analysis,
+            )
+
+            if not updated:
+                await message.reply("⚠️ Couldn't update the meal in the database.")
+                return
+
+            # Send corrected breakdown
+            embed = discord.Embed(
+                title="✏️  Corrected Nutrition Breakdown",
+                description=display_text,
+                color=discord.Color.orange(),
+                timestamp=dt,
+            )
+            embed.set_footer(text=f"Corrected for {message.author.display_name} | was {old_kcal} kcal")
+            await message.reply(embed=embed)
+
+            # Updated budget
+            budget_text = build_budget_text(user_id, day_key, dt)
+            budget_embed = discord.Embed(
+                title="🎯  Updated Daily Budget",
+                description=budget_text,
+                color=discord.Color.gold(),
+                timestamp=dt,
+            )
+            await message.channel.send(embed=budget_embed)
+
+            log.info("Corrected meal #%s: %s → %s kcal for user %s",
+                     last_meal["id"], old_kcal, parsed["kcal"], user_id)
+
+        except Exception as e:
+            log.exception("Error processing correction")
+            await message.reply(f"⚠️ Couldn't process correction: {e}")
 
 
 # ---------------------------------------------------------------------------
