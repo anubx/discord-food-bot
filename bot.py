@@ -12,6 +12,8 @@ Discord Food Tracker Bot
 import os
 import re
 import io
+import csv
+import csv
 import base64
 import logging
 import sqlite3
@@ -64,15 +66,95 @@ log = logging.getLogger("foodbot")
 # A "day" runs from 04:00 to 03:59 next day.
 # ---------------------------------------------------------------------------
 MEAL_WINDOWS = [
-    (8,  11, "Breakfast",       "🌅"),   # 08:00 – 10:59
-    (11, 14, "Morning Snack",   "🍎"),   # 11:00 – 13:59
-    (14, 17, "Lunch",           "🥗"),   # 14:00 – 16:59
-    (17, 20, "Afternoon Snack", "🍌"),   # 17:00 – 19:59
-    (20, 23, "Dinner",          "🍽️"),   # 20:00 – 22:59
-    (23, 4,  "Evening Snack",   "🌙"),   # 23:00 – 03:59
+    (7,  10, "Breakfast",       "🌅"),   # 07:00 – 09:59
+    (10, 13, "Morning Snack",   "🍎"),   # 10:00 – 12:59
+    (13, 16, "Lunch",           "🥗"),   # 13:00 – 15:59
+    (16, 19, "Afternoon Snack", "🍌"),   # 16:00 – 18:59
+    (19, 22, "Dinner",          "🍽️"),   # 19:00 – 21:59
+    (22, 4,  "Evening Snack",   "🌙"),   # 22:00 – 03:59
 ]
 
 REMINDER_HOURS = [(w[0], w[2], w[3]) for w in MEAL_WINDOWS]
+
+# ---------------------------------------------------------------------------
+# Translations
+# ---------------------------------------------------------------------------
+TRANSLATIONS = {
+    "en": {
+        "welcome_title": "Welcome to FoodTracker, {name}!",
+        "welcome_desc": "I'm your meal tracking bot. Everything happens right here in DMs — only you and I can see your data.",
+        "get_started": "Get started:",
+        "photo_method": "Send a food photo — I'll analyze macros & calories",
+        "voice_method": "Voice message — describe what you ate",
+        "text_method": "Text — e.g. two eggs and toast",
+        "barcode_method": "Barcode photo — exact nutrition from the package",
+        "defaults_line": "Your defaults: 2000 kcal/day target",
+        "set_target": "Change with `!target 1800` · Set macros with `!macros protein=150`",
+        "set_timezone": "Set your timezone: `!timezone Europe/Berlin`",
+        "set_language": "Change language: `!language de` (English, German)",
+        "all_commands": "All commands: `!commands`",
+        "try_now": "Try it now — send me a food photo!",
+        "budget_remaining": "**🔥 {remaining} kcal remaining today** (of {target} kcal target)",
+        "budget_on_target": "**✅ You've hit your {target} kcal target exactly!**",
+        "budget_over": "**⚠️ {over} kcal over target** ({consumed} / {target} kcal)",
+        "no_target": "⚠️ No calorie target set. Use `!target <kcal>` to set one.",
+        "no_meals": "No meals logged today yet. Send a food photo to get started!",
+        "water_check": "Water check!",
+        "water_auto": "~{ml}ml water from this meal auto-logged.",
+        "water_today": "Today: **{total}ml** / {target}ml",
+        "water_to_go": "{remaining}ml to go!",
+        "water_prompt": "Did you drink water with this meal? Log it: `!water 250`",
+        "water_reached": "Target reached!",
+        "streak_none": "🔥 No active streak yet. Log meals and stay within your calorie target to start building one!",
+        "streak_one": "🔥 **1 day** streak! You hit your target yesterday. Keep it going today!",
+        "export_ready": "Here's your data export:",
+        "deletedata_warn": "⚠️ **This will permanently delete ALL your data:**\nMeals, weight, water, body fat, settings — everything.\n\n**This cannot be undone.**\n\n**Type `!deletedata confirm` to proceed.**",
+        "deletedata_done": "✅ All your data has been permanently deleted. You can start fresh anytime by messaging me.",
+        "language_set": "✅ Language set to **English**",
+        "language_current": "🌐 Your language: **English**\nChange: `!language de` (en, de)",
+    },
+    "de": {
+        "welcome_title": "Willkommen bei FoodTracker, {name}!",
+        "welcome_desc": "Ich bin dein Mahlzeiten-Tracking-Bot. Alles passiert hier in DMs — nur du und ich können deine Daten sehen.",
+        "get_started": "Los geht's:",
+        "photo_method": "Sende ein Essensfoto — ich analysiere Makros & Kalorien",
+        "voice_method": "Sprachnachricht — beschreibe was du gegessen hast",
+        "text_method": "Text — z.B. zwei Eier und Toast",
+        "barcode_method": "Barcode-Foto — exakte Nährwerte von der Verpackung",
+        "defaults_line": "Standard: 2000 kcal/Tag Ziel",
+        "set_target": "Ändern mit `!target 1800` · Makros mit `!macros protein=150`",
+        "set_timezone": "Zeitzone einstellen: `!timezone Europe/Berlin`",
+        "set_language": "Sprache ändern: `!language en` (Englisch, Deutsch)",
+        "all_commands": "Alle Befehle: `!commands`",
+        "try_now": "Probier's aus — sende mir ein Essensfoto!",
+        "budget_remaining": "**🔥 {remaining} kcal übrig heute** (von {target} kcal Ziel)",
+        "budget_on_target": "**✅ Du hast dein {target} kcal Ziel genau getroffen!**",
+        "budget_over": "**⚠️ {over} kcal über dem Ziel** ({consumed} / {target} kcal)",
+        "no_target": "⚠️ Kein Kalorienziel gesetzt. Nutze `!target <kcal>` um eins zu setzen.",
+        "no_meals": "Noch keine Mahlzeiten heute. Sende ein Essensfoto zum Starten!",
+        "water_check": "Wasser-Check!",
+        "water_auto": "~{ml}ml Wasser aus dieser Mahlzeit automatisch erfasst.",
+        "water_today": "Heute: **{total}ml** / {target}ml",
+        "water_to_go": "Noch {remaining}ml!",
+        "water_prompt": "Hast du Wasser zum Essen getrunken? Logge es: `!water 250`",
+        "water_reached": "Ziel erreicht!",
+        "streak_none": "🔥 Noch kein aktiver Streak. Logge Mahlzeiten und bleibe unter deinem Ziel!",
+        "streak_one": "🔥 **1 Tag** Streak! Du hast gestern dein Ziel erreicht. Weiter so!",
+        "export_ready": "Hier ist dein Datenexport:",
+        "deletedata_warn": "⚠️ **Dies löscht ALLE deine Daten permanent:**\nMahlzeiten, Gewicht, Wasser, Körperfett, Einstellungen — alles.\n\n**Dies kann nicht rückgängig gemacht werden.**\n\n**Tippe `!deletedata confirm` zum Fortfahren.**",
+        "deletedata_done": "✅ Alle deine Daten wurden permanent gelöscht. Du kannst jederzeit neu starten.",
+        "language_set": "✅ Sprache auf **Deutsch** gesetzt",
+        "language_current": "🌐 Deine Sprache: **Deutsch**\nÄndern: `!language en` (en, de)",
+    },
+}
+
+LANGUAGE_NAMES = {"en": "English", "de": "Deutsch"}
+
+
+# ---------------------------------------------------------------------------
+# Translations
+# ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
 # Database
@@ -105,7 +187,11 @@ def init_db():
             interaction_count INTEGER NOT NULL DEFAULT 0,
             interaction_period TEXT,
             protein_target INTEGER,
-            fat_target    INTEGER NOT NULL DEFAULT 50
+            fat_target    INTEGER NOT NULL DEFAULT 50,
+            language        TEXT NOT NULL DEFAULT 'en',
+            user_timezone   TEXT
+            language        TEXT NOT NULL DEFAULT 'en',
+            user_timezone   TEXT
         );
         CREATE TABLE IF NOT EXISTS meals (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -163,6 +249,8 @@ def init_db():
         "protein_target": "ALTER TABLE user_settings ADD COLUMN protein_target INTEGER",
         "fat_target": "ALTER TABLE user_settings ADD COLUMN fat_target INTEGER NOT NULL DEFAULT 50",
         "bodyfat_consent": "ALTER TABLE user_settings ADD COLUMN bodyfat_consent INTEGER NOT NULL DEFAULT 0",
+        "language": "ALTER TABLE user_settings ADD COLUMN language TEXT NOT NULL DEFAULT 'en'",
+        "user_timezone": "ALTER TABLE user_settings ADD COLUMN user_timezone TEXT",
     }
     for col, sql in migrations.items():
         if col not in existing_cols:
@@ -188,6 +276,101 @@ def init_db():
 def now_tz() -> datetime:
     return datetime.now(ZoneInfo(TIMEZONE))
 
+def get_user_timezone(user_id: str) -> str:
+    """Return user's timezone or fall back to TIMEZONE env var."""
+    conn = get_db()
+    row = conn.execute("SELECT user_timezone FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if row and row["user_timezone"]:
+        return row["user_timezone"]
+    return TIMEZONE
+
+def set_user_timezone(user_id: str, tz_str: str):
+    conn = get_db()
+    conn.execute(
+        "UPDATE user_settings SET user_timezone = ? WHERE user_id = ?",
+        (tz_str, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+def now_user(user_id: str) -> datetime:
+    """Get current time in user's timezone."""
+    tz = get_user_timezone(user_id)
+    return datetime.now(ZoneInfo(tz))
+
+def get_user_language(user_id: str) -> str:
+    conn = get_db()
+    row = conn.execute("SELECT language FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if row and row["language"]:
+        return row["language"]
+    return "en"
+
+def set_user_language(user_id: str, lang: str):
+    conn = get_db()
+    conn.execute("UPDATE user_settings SET language = ? WHERE user_id = ?", (lang, user_id))
+    conn.commit()
+    conn.close()
+
+def t(user_id: str, key: str, **kwargs) -> str:
+    """Get translated string for a user."""
+    lang = get_user_language(user_id)
+    translations = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
+    text = translations.get(key, TRANSLATIONS["en"].get(key, key))
+    if kwargs:
+        text = text.format(**kwargs)
+    return text
+
+
+def get_user_timezone(user_id: str) -> str:
+    """Return user's timezone or fall back to TIMEZONE env var."""
+    conn = get_db()
+    row = conn.execute("SELECT user_timezone FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if row and row["user_timezone"]:
+        return row["user_timezone"]
+    return TIMEZONE
+
+def set_user_timezone(user_id: str, tz_str: str):
+    conn = get_db()
+    conn.execute(
+        "UPDATE user_settings SET user_timezone = ? WHERE user_id = ?",
+        (tz_str, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+def now_user(user_id: str) -> datetime:
+    """Get current time in user's timezone."""
+    tz = get_user_timezone(user_id)
+    return datetime.now(ZoneInfo(tz))
+
+def get_user_language(user_id: str) -> str:
+    conn = get_db()
+    row = conn.execute("SELECT language FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if row and row["language"]:
+        return row["language"]
+    return "en"
+
+def set_user_language(user_id: str, lang: str):
+    conn = get_db()
+    conn.execute("UPDATE user_settings SET language = ? WHERE user_id = ?", (lang, user_id))
+    conn.commit()
+    conn.close()
+
+def t(user_id: str, key: str, **kwargs) -> str:
+    """Get translated string for a user."""
+    lang = get_user_language(user_id)
+    translations = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
+    text = translations.get(key, TRANSLATIONS["en"].get(key, key))
+    if kwargs:
+        text = text.format(**kwargs)
+    return text
+
+    return datetime.now(ZoneInfo(TIMEZONE))
+
 def get_food_day(dt: datetime) -> str:
     if dt.hour < 4:
         dt = dt - timedelta(days=1)
@@ -195,17 +378,17 @@ def get_food_day(dt: datetime) -> str:
 
 def get_current_window_idx(dt: datetime) -> int:
     h = dt.hour
-    if 4 <= h < 8:
+    if 4 <= h < 7:
         return -1
-    if 8 <= h < 11:
+    if 7 <= h < 10:
         return 0
-    if 11 <= h < 14:
+    if 10 <= h < 13:
         return 1
-    if 14 <= h < 17:
+    if 13 <= h < 16:
         return 2
-    if 17 <= h < 20:
+    if 16 <= h < 19:
         return 3
-    if 20 <= h < 23:
+    if 19 <= h < 22:
         return 4
     return 5
 
@@ -213,7 +396,7 @@ def get_remaining_windows(dt: datetime) -> list[int]:
     h = dt.hour
     if h < 4:
         return [5]
-    if 4 <= h < 8:
+    if 4 <= h < 7:
         return [0, 1, 2, 3, 4, 5]
     remaining = []
     for i, (start, end, _, _) in enumerate(MEAL_WINDOWS):
@@ -3822,5 +4005,152 @@ async def cmd_deletedata(ctx: commands.Context, confirm: str = None):
         "You can re-register anytime by messaging me `!join`."
     )
 
+
+@bot.command(name="timezone")
+async def cmd_timezone(ctx, *, tz_str: str = None):
+    """Set or view your timezone. Usage: !timezone Europe/Berlin"""
+    user_id = str(ctx.author.id)
+    if tz_str is None:
+        current = get_user_timezone(user_id)
+        user_now = datetime.now(ZoneInfo(current))
+        await ctx.reply(f"🕐 Your timezone: **{current}**\nYour current time: **{user_now.strftime('%H:%M')}**\nChange: `!timezone America/New_York`")
+        return
+    # Validate timezone
+    try:
+        ZoneInfo(tz_str)
+    except (KeyError, Exception):
+        await ctx.reply(f"⚠️ Invalid timezone: `{tz_str}`\n\nExamples: `Europe/Berlin`, `America/New_York`, `Asia/Tokyo`, `US/Pacific`\nFull list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones")
+        return
+    set_user_timezone(user_id, tz_str)
+    user_now = datetime.now(ZoneInfo(tz_str))
+    await ctx.reply(f"✅ Timezone set to **{tz_str}**\nYour current time: **{user_now.strftime('%H:%M')}**\n\nReminders and meal windows will now use your local time.")
+
+
+@bot.command(name="language")
+async def cmd_language(ctx, lang: str = None):
+    """Set or view your language. Usage: !language de"""
+    user_id = str(ctx.author.id)
+    if lang is None:
+        await ctx.reply(t(user_id, "language_current"))
+        return
+    lang = lang.lower().strip()
+    if lang not in TRANSLATIONS:
+        available = ", ".join("`{}` ({})".format(k, v) for k, v in LANGUAGE_NAMES.items())
+        await ctx.reply(f"⚠️ Unknown language: `{lang}`\nAvailable: {available}")
+        return
+    set_user_language(user_id, lang)
+    await ctx.reply(t(user_id, "language_set"))
+
+
+@bot.command(name="export")
+async def cmd_export(ctx, period: str = None):
+    """Export your data. Usage: !export week | !export month | !export all"""
+    user_id = str(ctx.author.id)
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    
+    if period is None:
+        await ctx.reply(
+            "📤 **Data Export**\n"
+            "`!export week` — last 7 days (CSV)\n"
+            "`!export month` — current month (CSV)\n"
+            "`!export all` — all data (CSV)\n"
+        )
+        return
+    
+    period = period.lower().strip()
+    if period == "week":
+        end_dt = datetime.strptime(day_key, "%Y-%m-%d")
+        start_dt = end_dt - timedelta(days=6)
+        start = start_dt.strftime("%Y-%m-%d")
+        end = day_key
+        filename = f"foodtracker-week-{end}.csv"
+    elif period == "month":
+        start = "{:04d}-{:02d}-01".format(dt.year, dt.month)
+        end = day_key
+        filename = f"foodtracker-{dt.year:04d}-{dt.month:02d}.csv"
+    elif period == "all":
+        start = None
+        end = None
+        filename = f"foodtracker-all-{day_key}.csv"
+    else:
+        await ctx.reply("Unknown period. Use: `!export week`, `!export month`, or `!export all`")
+        return
+    
+    csv_data = export_meals_csv(user_id, start, end)
+    csv_bytes = csv_data.getvalue().encode("utf-8")
+    
+    if len(csv_bytes) < 10:
+        await ctx.reply("No data to export for that period.")
+        return
+    
+    file = discord.File(io.BytesIO(csv_bytes), filename=filename)
+    lang_text = t(user_id, "export_ready")
+    await ctx.reply(lang_text, file=file)
+
+
+
+
+def export_meals_csv(user_id: str, start_date: str = None, end_date: str = None) -> io.StringIO:
+    """Export meals to CSV. If no dates, export all."""
+    conn = get_db()
+    if start_date and end_date:
+        rows = conn.execute(
+            "SELECT day_key, timestamp, kcal, protein_g, carbs_g, fat_g, description, water_ml "
+            "FROM meals WHERE user_id = ? AND day_key >= ? AND day_key <= ? ORDER BY timestamp",
+            (user_id, start_date, end_date),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT day_key, timestamp, kcal, protein_g, carbs_g, fat_g, description, water_ml "
+            "FROM meals WHERE user_id = ? ORDER BY timestamp",
+            (user_id,),
+        ).fetchall()
+    conn.close()
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Date", "Timestamp", "Calories", "Protein (g)", "Carbs (g)", "Fat (g)", "Description", "Water (ml)"])
+    for r in rows:
+        writer.writerow([r["day_key"], r["timestamp"], r["kcal"], "{:.1f}".format(r["protein_g"]), 
+                        "{:.1f}".format(r["carbs_g"]), "{:.1f}".format(r["fat_g"]), r["description"] or "", r["water_ml"]])
+    output.seek(0)
+    return output
+
+
+@bot.command(name="timezone")
+async def cmd_timezone(ctx, *, tz_str: str = None):
+    """Set or view your timezone. Usage: !timezone Europe/Berlin"""
+    user_id = str(ctx.author.id)
+    if tz_str is None:
+        current = get_user_timezone(user_id)
+        user_now = datetime.now(ZoneInfo(current))
+        await ctx.reply(f"🕐 Your timezone: **{current}**\nYour current time: **{user_now.strftime('%H:%M')}**\nChange: `!timezone America/New_York`")
+        return
+    # Validate timezone
+    try:
+        ZoneInfo(tz_str)
+    except (KeyError, Exception):
+        await ctx.reply(f"⚠️ Invalid timezone: `{tz_str}`\n\nExamples: `Europe/Berlin`, `America/New_York`, `Asia/Tokyo`, `US/Pacific`\nFull list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones")
+        return
+    set_user_timezone(user_id, tz_str)
+    user_now = datetime.now(ZoneInfo(tz_str))
+    await ctx.reply(f"✅ Timezone set to **{tz_str}**\nYour current time: **{user_now.strftime('%H:%M')}**\n\nReminders and meal windows will now use your local time.")
+
+
+@bot.command(name="language")
+async def cmd_language(ctx, lang: str = None):
+    """Set or view your language. Usage: !language de"""
+    user_id = str(ctx.author.id)
+    if lang is None:
+        await ctx.reply(t(user_id, "language_current"))
+        return
+    lang = lang.lower().strip()
+    if lang not in TRANSLATIONS:
+        available = ", ".join("`{}` ({})".format(k, v) for k, v in LANGUAGE_NAMES.items())
+        await ctx.reply(f"⚠️ Unknown language: `{lang}`\nAvailable: {available}")
+        return
+    set_user_language(user_id, lang)
+    await ctx.reply(t(user_id, "language_set"))
 
 

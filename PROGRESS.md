@@ -23,7 +23,7 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 
 ### Calorie Budget System
 - [x] Per-user daily calorie target (`!target`)
-- [x] 6 meal windows: Breakfast (8–11), Morning Snack (11–14), Lunch (14–17), Afternoon Snack (17–20), Dinner (20–23), Evening Snack (23–4)
+- [x] 6 meal windows: Breakfast (7–10), Morning Snack (10–13), Lunch (13–16), Afternoon Snack (16–19), Dinner (19–22), Evening Snack (22–4)
 - [x] 4am day boundary (meals before 4am count as previous day)
 - [x] Auto budget update after each meal — remaining kcal split across future windows
 - [x] Body fat burn/gain estimate (7,700 kcal = 1kg fat)
@@ -106,6 +106,20 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 - [x] **`!bodyfat delete`** — revoke consent and delete all body fat data
 - [x] **Integrated in reports** — weekly/monthly reports show BF% trend when user has consented
 
+### Multi-Language & Localization
+- [x] **English + German** — full translation for key UI strings (welcome, budget, water, streaks, export, deletion)
+- [x] **`!language de`** — switch between English and German, persisted in user_settings
+- [x] **Translation function `t()`** — graceful fallback to English for any missing keys
+- [x] **Per-user timezone** — `!timezone Europe/Berlin` with validation, stored per user
+- [x] **`now_user(user_id)`** — all time calculations use user's local timezone
+- [x] **Onboarding prompt** — welcome message includes timezone and language setup hints
+
+### Data Export
+- [x] **`!export week`** — CSV export of last 7 days (meals with macros, descriptions, water)
+- [x] **`!export month`** — CSV export of current month
+- [x] **`!export all`** — CSV export of all historical meal data
+- [x] **Discord file attachment** — CSV sent as downloadable file in DMs
+
 ### GDPR & Privacy Compliance
 - [x] **`!deletedata` command** — two-step confirmation, permanently deletes ALL user data (meals, weight, water, body fat, settings)
 - [x] **Privacy Policy v2** (`privacy.html`) — comprehensive update covering: DM architecture, body measurements, health data notice (GDPR Art. 9, CCPA, PIPEDA, FADP), data minimization, EU hosting, legal basis, international transfers, right to deletion via bot command
@@ -153,6 +167,25 @@ AI-powered Discord bot for meal tracking with photo analysis, barcode scanning, 
 | Body fat consent | Explicit opt-in (GDPR Art. 9) | Health data = special category; requires affirmative action before any processing |
 | Data deletion | Self-service `!deletedata` | Instant deletion, no 30-day wait; covers GDPR, CCPA, PIPEDA, FADP right to erasure |
 | DM architecture | All tracking in DMs | Admin cannot see health data; genuine privacy vs private channels |
+| Meal window times | 7am start (shifted -1h) | Earlier breakfast window (7-10) better matches European meal patterns |
+| Multi-language | EN + DE only | Primary user base is German-speaking; adding more languages is easy via TRANSLATIONS dict |
+| Timezone | Per-user, stored in DB | Users in different timezones get correct meal windows, reminders, and day boundaries |
+| Data export | CSV via `!export` | GDPR data portability right; users can import into spreadsheets/MyFitnessPal |
+
+---
+
+## Technical Roadmap (Not Yet Implemented)
+
+These are evaluated but not yet built. Listed in order of when they'll likely become necessary:
+
+| Feature | When to Build | Why It Matters |
+|---------|--------------|----------------|
+| **Rate limiting** | Now / soon | Prevents API cost spikes from malicious users or bots. One bad actor sending 50 photos in 10 seconds runs up Gemini costs. Simple in-memory limiter (1 request/5s/user) is cheap insurance |
+| **Slash commands** | When Discord restricts Message Content intent further | Discord is pushing toward `/command` style. Shows autocomplete, parameter hints, appears in command picker. Works without Message Content privileged intent. Run both systems in parallel during transition |
+| **PostgreSQL migration** | ~50+ concurrent users | SQLite has single-writer lock. Once meal reminders trigger 50+ users logging simultaneously, you'll see "database is locked" errors. Postgres handles concurrent writes natively. Railway offers managed Postgres as add-on |
+| **Redis caching** | ~200+ users hitting `!budget` at same time | Every `!budget` is 4+ DB queries. Redis caches these at ~1ms vs ~5ms SQLite. Matters when reminder goes out and hundreds check budget at once. Railway offers Redis add-on |
+| **Web dashboard** | Post-traction, premium differentiator | Website for charts, trends, history outside Discord. "MyFitnessPal lite" companion. Major selling point for premium. Significant effort (auth, frontend, API) but natural growth path |
+| **Health app integrations** | After web dashboard | Apple Health, Google Fit, MyFitnessPal sync. Holy grail but requires OAuth flows, webhooks, platform APIs. Apple Health needs native app (ruled out). Google Fit has REST API. CSV export is the stepping stone |
 
 ---
 
@@ -447,9 +480,9 @@ Expected ~$0.00015/interaction with Gemini 2.5 Flash Lite. Needs live testing to
 - [ ] Meal templates / favorites — save and reuse frequent meals (`!save breakfast1`, `!log breakfast1`)
 - [ ] Recipe analysis — paste a recipe URL and get per-serving macros
 - [ ] Restaurant menu lookup — "I'm eating at McDonald's, Big Mac combo"
-- [ ] Export data to CSV/PDF (`!export week`)
-- [ ] Multi-language support (German prompts since Berlin timezone)
-- [ ] Timezone per user (currently server-wide Berlin)
+- [x] ~~Export data to CSV~~ — **Done.** `!export week/month/all` as CSV file attachment
+- [x] ~~Multi-language support~~ — **Done.** English + German, `!language` command, translation function with fallback
+- [x] ~~Timezone per user~~ — **Done.** `!timezone` command, stored per user, used for meal windows + day boundaries
 
 ### Social & Gamification (build these for the "compete together" angle)
 - [ ] Weekly challenges ("Protein Week: hit 150g protein daily")
@@ -458,11 +491,11 @@ Expected ~$0.00015/interaction with Gemini 2.5 Flash Lite. Needs live testing to
 - [ ] Meal reactions — friends can react to meal photos
 - [ ] "Cheat day" mode — relaxed target with no penalty
 
-### Technical Improvements
-- [ ] PostgreSQL migration for better concurrency at scale
-- [ ] Redis caching for frequent DB queries
-- [ ] Rate limiting per user to prevent API cost spikes
+### Technical Improvements (see "Technical Roadmap" section above for detailed analysis)
+- [ ] Rate limiting per user to prevent API cost spikes (**priority — cheap insurance**)
 - [ ] Slash commands (Discord interactions) alongside `!` prefix commands
+- [ ] PostgreSQL migration for better concurrency at scale (~50+ concurrent users)
+- [ ] Redis caching for frequent DB queries (~200+ users)
 - [ ] Dashboard web UI for viewing history/charts outside Discord
 - [ ] Webhook integration for MyFitnessPal / Apple Health / Google Fit
 
