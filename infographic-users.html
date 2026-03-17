@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FoodTracker — How It Works</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: linear-gradient(160deg, #fef3c7 0%, #fce7f3 35%, #dbeafe 65%, #d1fae5 100%);
+    min-height: 100vh;
+    padding: 40px 20px;
+    color: #1e293b;
+  }
+
+  .container { max-width: 900px; margin: 0 auto; }
+
+  /* ── HEADER ── */
+  .header {
+    text-align: center;
+    margin-bottom: 52px;
+  }
+  .header .logo { font-size: 4rem; margin-bottom: 4px; }
+  .header h1 {
+    font-size: 2.8rem;
+    font-weight: 900;
+    background: linear-gradient(135deg, #f97316, #ec4899, #8b5cf6, #06b6d4);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .header p {
+    font-size: 1.1rem;
+    color: #64748b;
+    margin-top: 6px;
+    font-weight: 500;
+  }
+
+  /* ── STEP SECTIONS ── */
+  .step-section {
+    margin-bottom: 44px;
+  }
+  .step-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+  .step-num {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 900;
+    font-size: 1.2rem;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .step-header h2 {
+    font-size: 1.35rem;
+    font-weight: 800;
+  }
+
+  /* ── CARDS ── */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: #fff;
+    border-radius: 20px;
+    padding: 24px 20px;
+    text-align: center;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+    transition: transform 0.2s;
+  }
+  .card:hover { transform: translateY(-3px); }
+  .card .icon { font-size: 2.6rem; margin-bottom: 10px; }
+  .card h3 { font-size: 1rem; font-weight: 700; margin-bottom: 6px; }
+  .card p { font-size: 0.82rem; color: #64748b; line-height: 1.5; }
+  .card em { color: #8b5cf6; font-style: normal; font-weight: 600; }
+
+  /* ── FLOW ── */
+  .flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex-wrap: wrap;
+  }
+  .flow-step {
+    background: #fff;
+    border-radius: 20px;
+    padding: 22px 18px;
+    width: 180px;
+    text-align: center;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+  }
+  .flow-step .icon { font-size: 2.2rem; margin-bottom: 8px; }
+  .flow-step h3 { font-size: 0.9rem; font-weight: 700; margin-bottom: 4px; }
+  .flow-step p { font-size: 0.78rem; color: #64748b; line-height: 1.45; }
+  .flow-arrow {
+    font-size: 1.5rem;
+    color: #cbd5e1;
+    min-width: 32px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  /* ── CORRECTION BOX ── */
+  .correction-box {
+    background: linear-gradient(135deg, #fef3c7, #fff7ed);
+    border-radius: 22px;
+    padding: 28px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.05);
+  }
+  .correction-box .example {
+    background: #fff;
+    border-radius: 14px;
+    padding: 16px 20px;
+    margin-top: 16px;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    border-left: 4px solid #f97316;
+  }
+  .correction-box .example .label {
+    font-weight: 700;
+    color: #f97316;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+
+  /* ── SCHEDULE ── */
+  .schedule-row {
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .schedule-item {
+    background: #fff;
+    border-radius: 16px;
+    padding: 16px 10px;
+    text-align: center;
+    flex: 1;
+    min-width: 85px;
+    box-shadow: 0 3px 16px rgba(0,0,0,0.05);
+  }
+  .schedule-item .s-emoji { font-size: 1.8rem; }
+  .schedule-item .s-time { font-weight: 800; font-size: 1rem; margin: 4px 0 2px; }
+  .schedule-item .s-label { font-size: 0.7rem; color: #64748b; font-weight: 600; }
+
+  /* ── COMMAND LIST ── */
+  .cmd-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 10px;
+  }
+  .cmd-item {
+    background: #fff;
+    border-radius: 14px;
+    padding: 14px 18px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.04);
+  }
+  .cmd-item code {
+    background: #f1f5f9;
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 0.82rem;
+    color: #7c3aed;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .cmd-item span { font-size: 0.82rem; color: #475569; }
+
+  /* ── SOCIAL SECTION ── */
+  .social-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+  }
+  .social-card {
+    background: #fff;
+    border-radius: 20px;
+    padding: 24px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+  }
+  .social-card .card-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .social-card .card-top .icon { font-size: 1.8rem; }
+  .social-card .card-top h3 { font-size: 1rem; font-weight: 700; }
+  .social-card p { font-size: 0.82rem; color: #64748b; line-height: 1.5; }
+
+  /* ── TIP BOX ── */
+  .tip-box {
+    background: linear-gradient(135deg, #dbeafe, #ede9fe);
+    border-radius: 20px;
+    padding: 24px 28px;
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.05);
+  }
+  .tip-box .tip-icon { font-size: 2rem; flex-shrink: 0; }
+  .tip-box p { font-size: 0.88rem; color: #334155; line-height: 1.6; }
+  .tip-box strong { color: #6d28d9; }
+
+  /* ── FOOTER ── */
+  .footer {
+    text-align: center;
+    margin-top: 48px;
+    padding: 16px;
+    font-size: 0.82rem;
+    color: #94a3b8;
+  }
+
+  /* ── COLORS ── */
+  .bg-orange { background: #f97316; }
+  .bg-pink { background: #ec4899; }
+  .bg-purple { background: #8b5cf6; }
+  .bg-cyan { background: #06b6d4; }
+  .bg-green { background: #10b981; }
+  .bg-blue { background: #3b82f6; }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 640px) {
+    .header h1 { font-size: 2rem; }
+    .flow { flex-direction: column; }
+    .flow-arrow { transform: rotate(90deg); min-width: auto; }
+    .flow-step { width: 85%; }
+    .schedule-row { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- ═══ HEADER ═══ -->
+  <div class="header">
+    <div class="logo">🍽️</div>
+    <h1>FoodTracker</h1>
+    <p>Track your meals, hit your calorie goals, compete with friends</p>
+  </div>
+
+  <!-- ═══ 1. GET STARTED ═══ -->
+  <div class="step-section">
+    <div class="step-header">
+      <div class="step-num bg-orange">1</div>
+      <h2>Get Started in 30 Seconds</h2>
+    </div>
+    <div class="flow">
+      <div class="flow-step">
+        <div class="icon">💬</div>
+        <h3>Type !join</h3>
+        <p>In the group channel to get your own private tracking channel</p>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="icon">🎯</div>
+        <h3>Set Your Goal</h3>
+        <p>Type <em>!target 2000</em> to set your daily calorie target</p>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="icon">🎉</div>
+        <h3>Start Logging!</h3>
+        <p>Post meals in your channel — the bot handles the rest</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 2. LOG YOUR MEALS ═══ -->
+  <div class="step-section">
+    <div class="step-header">
+      <div class="step-num bg-pink">2</div>
+      <h2>4 Easy Ways to Log Meals</h2>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <div class="icon">📸</div>
+        <h3>Snap a Photo</h3>
+        <p>Take a pic of your food and the bot identifies every item with calories & macros</p>
+      </div>
+      <div class="card">
+        <div class="icon">📦</div>
+        <h3>Scan a Barcode</h3>
+        <p>Photo any product barcode for <em>exact</em> nutrition data. Add <em>"half"</em> or <em>"2 spoons"</em> for portions</p>
+      </div>
+      <div class="card">
+        <div class="icon">✍️</div>
+        <h3>Type It Out</h3>
+        <p>Just describe your meal: <em>"two eggs, toast with butter, and coffee"</em></p>
+      </div>
+      <div class="card">
+        <div class="icon">🎤</div>
+        <h3>Voice Message</h3>
+        <p>Record a voice note — the bot transcribes and analyzes it automatically</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 3. WHAT HAPPENS NEXT ═══ -->
+  <div class="step-section">
+    <div class="step-header">
+      <div class="step-num bg-purple">3</div>
+      <h2>What Happens After You Log</h2>
+    </div>
+    <div class="flow">
+      <div class="flow-step">
+        <div class="icon">🤖</div>
+        <h3>AI Analyzes</h3>
+        <p>Identifies foods, estimates portions & macros</p>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="icon">📊</div>
+        <h3>You Get a Breakdown</h3>
+        <p>Calories, protein, carbs & fat per item + totals</p>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">
+        <div class="icon">🎯</div>
+        <h3>Budget Updates</h3>
+        <p>See remaining kcal split across your meal windows</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 4. FIX MISTAKES ═══ -->
+  <div class="step-section">
+    <div class="step-header">
+      <div class="step-num bg-cyan">4</div>
+      <h2>Made a Mistake? Just Reply</h2>
+    </div>
+    <div class="correction-box">
+      <p style="font-size: 0.95rem;">If the bot gets something wrong, <strong>reply to the nutrition breakdown</strong> with your corrections — by text or voice message. The bot re-evaluates the entire meal.</p>
+      <div class="example">
+        <div class="label">Example replies</div>
+        🗣️ <em>"the steak is 200g not 300g"</em><br>
+        🗣️ <em>"those aren't radishes, they're tomatoes"</em><br>
+        🗣️ <em>"remove the bread, I didn't eat it"</em><br>
+        🗣️ <em>"add a glass of orange juice"</em>
+      </div>
+      <div style="margin-top: 14px;">
+        <div class="tip-box">
+          <div class="tip-icon">💡</div>
+          <p>You can also use <strong>!undo</strong> to remove the last meal, <strong>!delete 2</strong> to remove a specific meal, or <strong>!edit 2 kcal=400</strong> to manually adjust values.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 5. DAILY REMINDERS ═══ -->
+  <div class="step-section">
+    <div class="step-header">
+      <div class="step-num bg-green">5</div>
+      <h2>Reminders Throughout the Day</h2>
+    </div>
+    <p style="font-size: 0.88rem; color: #64748b; margin-bottom: 14px;">You'll get a friendly nudge at each meal window so you never forget to log:</p>
+    <div class="schedule-row">
+      <div class="schedule-item">
+        <div class="s-emoji">🌅</div>
+        <div class="s-time">8:00</div>
+        <div class="s-label">Breakfast</div>
+      </div>
+      <div class="schedule-item">
+        <div class="s-emoji">🍎</div>
+        <div class="s-time">11:00</div>
+        <div class="s-label">Snack</div>
+      </div>
+      <div class="schedule-item">
+        <div class="s-emoji">🥗</div>
+        <div class="s-time">14:00</div>
+        <div class="s-label">Lunch</div>
+      </div>
+      <div class="schedule-item">
+        <div class="s-emoji">🍌</div>
+        <div class="s-time">17:00</div>
+        <div class="s-label">Snack</div>
+      </div>
+      <div class="schedule-item">
+        <div class="s-emoji">🍽️</div>
+        <div class="s-time">20:00</div>
+        <div class="s-label">Dinner</div>
+      </div>
+      <div class="schedule-item">
+        <div class="s-emoji">🌙</div>
+        <div class="s-time">23:00</div>
+        <div class="s-label">Evening</div>
+      </div>
+    </div>
+    <p style="font-size: 0.78rem; color: #94a3b8; margin-top: 10px; text-align: center;">At 4am you'll get a daily summary with body fat burn/gain estimate</p>
+  </div>
+
+  <!-- ═══ 6. COMPETE WITH FRIENDS ═══ -->
+  <div class="step-section">
+    <div class="step-header">
+      <div class="step-num bg-blue">6</div>
+      <h2>Compete With Friends</h2>
+    </div>
+    <div class="social-cards">
+      <div class="social-card">
+        <div class="card-top">
+          <span class="icon">🔒</span>
+          <h3>Your Meals, Your Channel</h3>
+        </div>
+        <p>Your meal photos and data stay in your private channel — only you and the bot can see them.</p>
+      </div>
+      <div class="social-card">
+        <div class="card-top">
+          <span class="icon">📢</span>
+          <h3>Group Feed</h3>
+        </div>
+        <p>Every meal posts a quick summary to the shared group channel so friends can cheer you on.</p>
+      </div>
+      <div class="social-card">
+        <div class="card-top">
+          <span class="icon">🏆</span>
+          <h3>Daily Leaderboard</h3>
+        </div>
+        <p>Who's closest to their calorie target? Check the rankings with <em>!leaderboard</em> anytime.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 7. ALL COMMANDS ═══ -->
+  <div class="step-section">
+    <div class="step-header">
+      <div class="step-num bg-purple">⌨</div>
+      <h2>Quick Command Reference</h2>
+    </div>
+    <div class="cmd-list">
+      <div class="cmd-item"><code>!join</code> <span>Create your private channel</span></div>
+      <div class="cmd-item"><code>!target 2000</code> <span>Set daily calorie goal</span></div>
+      <div class="cmd-item"><code>!budget</code> <span>Remaining kcal for today</span></div>
+      <div class="cmd-item"><code>!today</code> <span>See all meals logged today</span></div>
+      <div class="cmd-item"><code>!undo</code> <span>Remove last meal</span></div>
+      <div class="cmd-item"><code>!delete 2</code> <span>Delete a specific meal</span></div>
+      <div class="cmd-item"><code>!edit 2 kcal=400</code> <span>Manually fix values</span></div>
+      <div class="cmd-item"><code>!leaderboard</code> <span>Today's group rankings</span></div>
+      <div class="cmd-item"><code>!schedule</code> <span>View reminder times</span></div>
+      <div class="cmd-item"><code>!commands</code> <span>Show all commands</span></div>
+    </div>
+  </div>
+
+  <!-- ═══ FOOTER ═══ -->
+  <div class="footer">
+    🍽️ FoodTracker — Snap it. Track it. Crush your goals.
+  </div>
+
+</div>
+</body>
+</html>

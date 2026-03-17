@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FoodTracker — Cost Simulator</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', sans-serif;
+    background: linear-gradient(160deg, #f8fafc 0%, #eef2ff 50%, #fdf2f8 100%);
+    min-height: 100vh;
+    padding: 40px 20px;
+    color: #1e293b;
+  }
+  .container { max-width: 960px; margin: 0 auto; }
+  h1 {
+    font-size: 2rem;
+    font-weight: 900;
+    text-align: center;
+    margin-bottom: 6px;
+    background: linear-gradient(135deg, #f97316, #ec4899, #8b5cf6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .subtitle { text-align: center; color: #64748b; margin-bottom: 32px; font-size: 0.95rem; }
+
+  /* Sections */
+  .section {
+    background: #fff;
+    border-radius: 20px;
+    padding: 28px;
+    margin-bottom: 20px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.05);
+  }
+  .section h2 {
+    font-size: 1.15rem;
+    font-weight: 800;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .section h2 .icon { font-size: 1.4rem; }
+
+  /* Input grid */
+  .input-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+  }
+  .input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .input-group label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .input-group input, .input-group select {
+    padding: 10px 14px;
+    border: 2px solid #e2e8f0;
+    border-radius: 12px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    font-family: inherit;
+    transition: border-color 0.2s;
+  }
+  .input-group input:focus, .input-group select:focus {
+    outline: none;
+    border-color: #8b5cf6;
+  }
+
+  /* Cost table */
+  .cost-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0 6px;
+    margin-top: 12px;
+  }
+  .cost-table th {
+    text-align: left;
+    padding: 8px 14px;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: #94a3b8;
+  }
+  .cost-table td {
+    padding: 12px 14px;
+    font-size: 0.88rem;
+    background: #f8fafc;
+    border: none;
+  }
+  .cost-table tr td:first-child { border-radius: 10px 0 0 10px; font-weight: 600; }
+  .cost-table tr td:last-child { border-radius: 0 10px 10px 0; }
+  .cost-table .api-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: #fff;
+  }
+  .tag-openai { background: #10a37f; }
+  .tag-claude { background: #d97706; }
+  .tag-whisper { background: #3b82f6; }
+  .tag-free { background: #94a3b8; }
+  .cost-table .cost-val { font-weight: 700; font-family: 'SF Mono', 'Fira Code', monospace; }
+  .cost-table .cost-val.green { color: #10b981; }
+  .cost-table .cost-val.red { color: #ef4444; }
+
+  /* Totals bar */
+  .totals-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+    margin-top: 18px;
+  }
+  .total-card {
+    border-radius: 16px;
+    padding: 20px;
+    text-align: center;
+    color: #fff;
+  }
+  .total-card .t-label { font-size: 0.75rem; font-weight: 700; opacity: 0.85; text-transform: uppercase; letter-spacing: 0.5px; }
+  .total-card .t-value { font-size: 1.8rem; font-weight: 900; margin-top: 4px; font-family: 'SF Mono', 'Fira Code', monospace; }
+  .total-card .t-sub { font-size: 0.72rem; opacity: 0.75; margin-top: 2px; }
+  .bg-gradient-red { background: linear-gradient(135deg, #ef4444, #f97316); }
+  .bg-gradient-green { background: linear-gradient(135deg, #10b981, #06b6d4); }
+  .bg-gradient-purple { background: linear-gradient(135deg, #8b5cf6, #ec4899); }
+  .bg-gradient-blue { background: linear-gradient(135deg, #3b82f6, #6366f1); }
+
+  /* Projections */
+  .proj-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .proj-card {
+    background: #f8fafc;
+    border-radius: 14px;
+    padding: 16px;
+    text-align: center;
+  }
+  .proj-card .p-users { font-size: 0.72rem; font-weight: 700; color: #94a3b8; text-transform: uppercase; }
+  .proj-card .p-revenue { font-size: 1.1rem; font-weight: 800; color: #10b981; margin: 4px 0; }
+  .proj-card .p-cost { font-size: 0.82rem; color: #ef4444; font-weight: 600; }
+  .proj-card .p-profit { font-size: 0.95rem; font-weight: 800; margin-top: 4px; }
+  .proj-card .p-profit.pos { color: #10b981; }
+  .proj-card .p-profit.neg { color: #ef4444; }
+
+  /* Warning */
+  .warning {
+    background: #fef3c7;
+    border-left: 4px solid #f59e0b;
+    border-radius: 0 12px 12px 0;
+    padding: 14px 18px;
+    margin-top: 16px;
+    font-size: 0.85rem;
+    color: #92400e;
+  }
+  .note {
+    background: #ede9fe;
+    border-left: 4px solid #8b5cf6;
+    border-radius: 0 12px 12px 0;
+    padding: 14px 18px;
+    margin-top: 16px;
+    font-size: 0.85rem;
+    color: #5b21b6;
+  }
+
+  .footer { text-align: center; margin-top: 30px; color: #94a3b8; font-size: 0.78rem; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🧮 FoodTracker Cost Simulator</h1>
+  <p class="subtitle">Calculate exact API costs per user and find your profitable price point</p>
+
+  <!-- ═══ TEST SCENARIO ═══ -->
+  <div class="section">
+    <h2><span class="icon">🧪</span> Test Scenario — Actions Per User Per Day</h2>
+    <div class="input-grid">
+      <div class="input-group">
+        <label>📸 Photo analyses</label>
+        <input type="number" id="photos" value="3" min="0" max="50" oninput="recalc()">
+      </div>
+      <div class="input-group">
+        <label>🎤 Voice meal logs</label>
+        <input type="number" id="audios" value="1" min="0" max="50" oninput="recalc()">
+      </div>
+      <div class="input-group">
+        <label>✍️ Text meal logs</label>
+        <input type="number" id="texts" value="2" min="0" max="50" oninput="recalc()">
+      </div>
+      <div class="input-group">
+        <label>🔄 Photo reanalyses</label>
+        <input type="number" id="reanalyses" value="1" min="0" max="50" oninput="recalc()">
+      </div>
+      <div class="input-group">
+        <label>🎤✏️ Voice corrections</label>
+        <input type="number" id="voice_corrections" value="1" min="0" max="50" oninput="recalc()">
+      </div>
+      <div class="input-group">
+        <label>✍️✏️ Text corrections</label>
+        <input type="number" id="text_corrections" value="1" min="0" max="50" oninput="recalc()">
+      </div>
+    </div>
+    <div class="input-grid" style="margin-top: 14px;">
+      <div class="input-group">
+        <label>💰 Monthly price ($)</label>
+        <input type="number" id="price" value="3.99" min="0" max="99" step="0.01" oninput="recalc()">
+      </div>
+      <div class="input-group">
+        <label>🏦 Discord cut (%)</label>
+        <input type="number" id="discord_cut" value="15" min="0" max="50" oninput="recalc()">
+      </div>
+      <div class="input-group">
+        <label>📅 Days per month</label>
+        <input type="number" id="days" value="30" min="1" max="31" oninput="recalc()">
+      </div>
+      <div class="input-group">
+        <label>🎤 Avg voice length (sec)</label>
+        <input type="number" id="voice_sec" value="15" min="1" max="300" oninput="recalc()">
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ COST BREAKDOWN ═══ -->
+  <div class="section">
+    <h2><span class="icon">💸</span> Cost Breakdown — Per User Per Day</h2>
+    <table class="cost-table">
+      <thead>
+        <tr><th>Action</th><th>API</th><th>Qty</th><th>Unit Cost</th><th>Daily Cost</th></tr>
+      </thead>
+      <tbody id="cost-body"></tbody>
+    </table>
+  </div>
+
+  <!-- ═══ SUMMARY ═══ -->
+  <div class="section">
+    <h2><span class="icon">📊</span> Monthly Summary — Per User</h2>
+    <div class="totals-bar">
+      <div class="total-card bg-gradient-red">
+        <div class="t-label">Total API Cost</div>
+        <div class="t-value" id="total-cost">$0.00</div>
+        <div class="t-sub">per user / month</div>
+      </div>
+      <div class="total-card bg-gradient-blue">
+        <div class="t-label">Revenue After Discord</div>
+        <div class="t-value" id="total-revenue">$0.00</div>
+        <div class="t-sub">per user / month</div>
+      </div>
+      <div class="total-card bg-gradient-green" id="profit-card">
+        <div class="t-label">Profit Per User</div>
+        <div class="t-value" id="total-profit">$0.00</div>
+        <div class="t-sub" id="profit-pct">0% margin</div>
+      </div>
+      <div class="total-card bg-gradient-purple">
+        <div class="t-label">Free Tier Cost</div>
+        <div class="t-value" id="free-cost">$0.00</div>
+        <div class="t-sub">text-only user / month</div>
+      </div>
+    </div>
+    <div id="warning-box"></div>
+  </div>
+
+  <!-- ═══ SCALING PROJECTION ═══ -->
+  <div class="section">
+    <h2><span class="icon">🚀</span> Monthly Projections by User Count</h2>
+    <p style="font-size:0.82rem;color:#64748b;margin-bottom:4px;">Assuming 70% premium / 30% free tier split, and free users do 3 text logs/day only</p>
+    <div class="proj-grid" id="proj-grid"></div>
+    <div class="note">
+      <strong>7-day free trial cost:</strong> During trial, each user costs you <span id="trial-cost">$0.00</span> in API fees. At a 30% trial→paid conversion rate, your effective acquisition cost is <span id="acq-cost">$0.00</span> per paying user.
+    </div>
+  </div>
+
+  <!-- ═══ API PRICING REF ═══ -->
+  <div class="section">
+    <h2><span class="icon">📋</span> API Pricing Reference (current as of March 2026)</h2>
+    <table class="cost-table">
+      <thead><tr><th>API</th><th>Model</th><th>Pricing</th><th>Our Est. Per Call</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="api-tag tag-openai">OpenAI</span> Vision</td>
+          <td>GPT-4o</td>
+          <td>$2.50/1M input + $10/1M output tokens</td>
+          <td class="cost-val">~$0.01</td>
+        </tr>
+        <tr>
+          <td><span class="api-tag tag-whisper">OpenAI</span> Whisper</td>
+          <td>whisper-1</td>
+          <td>$0.006 / minute</td>
+          <td class="cost-val">~$0.0015 (15s)</td>
+        </tr>
+        <tr>
+          <td><span class="api-tag tag-claude">Claude</span> Text</td>
+          <td>Sonnet</td>
+          <td>$3/1M input + $15/1M output tokens</td>
+          <td class="cost-val">~$0.008</td>
+        </tr>
+        <tr>
+          <td><span class="api-tag tag-free">Open Food Facts</span></td>
+          <td>REST API</td>
+          <td>Free (no key needed)</td>
+          <td class="cost-val green">$0.00</td>
+        </tr>
+        <tr>
+          <td><span class="api-tag tag-free">Barcode</span> pyzbar</td>
+          <td>Local lib</td>
+          <td>Free (runs locally)</td>
+          <td class="cost-val green">$0.00</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="footer">FoodTracker Cost Simulator — adjust inputs above to find your sweet spot</div>
+</div>
+
+<script>
+// ── API cost constants (per call) ──
+const COSTS = {
+  photo:       0.010,   // GPT-4o Vision per image
+  whisper_min: 0.006,   // Whisper per minute
+  claude_text: 0.008,   // Claude Sonnet text analysis
+  claude_corr: 0.010,   // Claude correction (slightly more input)
+};
+
+function recalc() {
+  const photos     = +document.getElementById('photos').value || 0;
+  const audios     = +document.getElementById('audios').value || 0;
+  const texts      = +document.getElementById('texts').value || 0;
+  const reanalyses = +document.getElementById('reanalyses').value || 0;
+  const voiceCorr  = +document.getElementById('voice_corrections').value || 0;
+  const textCorr   = +document.getElementById('text_corrections').value || 0;
+  const price      = +document.getElementById('price').value || 0;
+  const discordPct = +document.getElementById('discord_cut').value || 0;
+  const days       = +document.getElementById('days').value || 30;
+  const voiceSec   = +document.getElementById('voice_sec').value || 15;
+
+  const whisperPerCall = COSTS.whisper_min * (voiceSec / 60);
+
+  // Build cost rows
+  const rows = [
+    { name: '📸 Photo analysis',       api: 'GPT-4o Vision',  tag: 'tag-openai',  qty: photos,     unit: COSTS.photo },
+    { name: '🎤 Voice → transcribe',   api: 'Whisper',        tag: 'tag-whisper', qty: audios,     unit: whisperPerCall },
+    { name: '🎤 Voice → text analysis', api: 'Claude Sonnet', tag: 'tag-claude',  qty: audios,     unit: COSTS.claude_text },
+    { name: '✍️ Text analysis',        api: 'Claude Sonnet',  tag: 'tag-claude',  qty: texts,      unit: COSTS.claude_text },
+    { name: '🔄 Photo reanalysis',     api: 'GPT-4o Vision',  tag: 'tag-openai',  qty: reanalyses, unit: COSTS.photo },
+    { name: '🎤✏️ Voice corr → transcribe', api: 'Whisper',   tag: 'tag-whisper', qty: voiceCorr,  unit: whisperPerCall },
+    { name: '🎤✏️ Voice corr → re-eval',    api: 'Claude Sonnet', tag: 'tag-claude', qty: voiceCorr, unit: COSTS.claude_corr },
+    { name: '✍️✏️ Text correction',    api: 'Claude Sonnet',  tag: 'tag-claude',  qty: textCorr,   unit: COSTS.claude_corr },
+    { name: '📦 Barcode lookup',        api: 'Free',          tag: 'tag-free',    qty: '-',        unit: 0 },
+  ];
+
+  let dailyCost = 0;
+  let html = '';
+  for (const r of rows) {
+    const daily = typeof r.qty === 'number' ? r.qty * r.unit : 0;
+    dailyCost += daily;
+    const qtyStr = typeof r.qty === 'number' ? r.qty : r.qty;
+    const unitStr = r.unit > 0 ? '$' + r.unit.toFixed(4) : '$0.00';
+    const dailyStr = daily > 0 ? '$' + daily.toFixed(4) : '$0.00';
+    const cls = daily === 0 ? 'green' : '';
+    html += `<tr>
+      <td>${r.name}</td>
+      <td><span class="api-tag ${r.tag}">${r.api}</span></td>
+      <td>${qtyStr}</td>
+      <td class="cost-val">${unitStr}</td>
+      <td class="cost-val ${cls}">${dailyStr}</td>
+    </tr>`;
+  }
+  // Total row
+  html += `<tr style="font-weight:800;background:#f1f5f9;">
+    <td colspan="4" style="border-radius:10px 0 0 10px;">DAILY TOTAL</td>
+    <td class="cost-val red" style="border-radius:0 10px 10px 0;">$${dailyCost.toFixed(4)}</td>
+  </tr>`;
+  document.getElementById('cost-body').innerHTML = html;
+
+  // Monthly
+  const monthlyCost = dailyCost * days;
+  const discountMult = 1 - (discordPct / 100);
+  const monthlyRevenue = price * discountMult;
+  const monthlyProfit = monthlyRevenue - monthlyCost;
+  const marginPct = monthlyRevenue > 0 ? (monthlyProfit / monthlyRevenue * 100) : 0;
+
+  document.getElementById('total-cost').textContent = '$' + monthlyCost.toFixed(2);
+  document.getElementById('total-revenue').textContent = '$' + monthlyRevenue.toFixed(2);
+  document.getElementById('total-profit').textContent = (monthlyProfit >= 0 ? '+$' : '-$') + Math.abs(monthlyProfit).toFixed(2);
+  document.getElementById('profit-pct').textContent = marginPct.toFixed(0) + '% margin';
+
+  const profitCard = document.getElementById('profit-card');
+  if (monthlyProfit < 0) {
+    profitCard.className = 'total-card bg-gradient-red';
+  } else {
+    profitCard.className = 'total-card bg-gradient-green';
+  }
+
+  // Free tier cost (text only, assume 3 texts/day)
+  const freeDaily = 3 * COSTS.claude_text;
+  const freeMonthly = freeDaily * days;
+  document.getElementById('free-cost').textContent = '$' + freeMonthly.toFixed(2);
+
+  // 7-day trial cost
+  const trialCost = dailyCost * 7;
+  const acqCost = trialCost / 0.30; // 30% conversion
+  document.getElementById('trial-cost').textContent = '$' + trialCost.toFixed(2);
+  document.getElementById('acq-cost').textContent = '$' + acqCost.toFixed(2);
+
+  // Warning
+  const warnBox = document.getElementById('warning-box');
+  if (monthlyProfit < 0) {
+    warnBox.innerHTML = `<div class="warning">⚠️ <strong>Negative margin!</strong> At $${price}/month you lose $${Math.abs(monthlyProfit).toFixed(2)} per user. Consider raising the price to at least <strong>$${(monthlyCost / discountMult + 0.50).toFixed(2)}</strong> for a healthy margin, or reduce photo analyses (the biggest cost driver).</div>`;
+  } else if (marginPct < 20) {
+    warnBox.innerHTML = `<div class="warning">⚠️ <strong>Thin margin (${marginPct.toFixed(0)}%).</strong> One heavy user could tip you negative. Consider a daily photo cap or a slightly higher price.</div>`;
+  } else {
+    warnBox.innerHTML = `<div class="note">✅ <strong>Healthy margin (${marginPct.toFixed(0)}%).</strong> You can absorb heavy users and still profit. Each paying user nets you ~$${monthlyProfit.toFixed(2)}/month.</div>`;
+  }
+
+  // Projections
+  const userCounts = [10, 25, 50, 100, 250, 500, 1000];
+  let projHtml = '';
+  for (const n of userCounts) {
+    const paid = Math.round(n * 0.7);
+    const free = n - paid;
+    const rev = paid * monthlyRevenue;
+    const cost = (paid * monthlyCost) + (free * freeMonthly);
+    const profit = rev - cost;
+    const cls = profit >= 0 ? 'pos' : 'neg';
+    const sign = profit >= 0 ? '+' : '-';
+    projHtml += `<div class="proj-card">
+      <div class="p-users">${n} users</div>
+      <div class="p-revenue">$${rev.toFixed(0)} rev</div>
+      <div class="p-cost">-$${cost.toFixed(0)} cost</div>
+      <div class="p-profit ${cls}">${sign}$${Math.abs(profit).toFixed(0)}/mo</div>
+    </div>`;
+  }
+  document.getElementById('proj-grid').innerHTML = projHtml;
+}
+
+// Run on load
+recalc();
+</script>
+</body>
+</html>

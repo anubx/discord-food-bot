@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FoodTracker Bot — Feature Infographic</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    background: linear-gradient(135deg, #fef9e7 0%, #fce4ec 30%, #e8f5e9 60%, #e3f2fd 100%);
+    min-height: 100vh;
+    padding: 40px 20px;
+    color: #2d3436;
+  }
+
+  .container { max-width: 1100px; margin: 0 auto; }
+
+  /* ── HEADER ── */
+  .header {
+    text-align: center;
+    margin-bottom: 50px;
+  }
+  .header h1 {
+    font-size: 3.2rem;
+    font-weight: 900;
+    background: linear-gradient(135deg, #ff6b6b, #ffa502, #2ed573, #1e90ff, #a55eea);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 8px;
+  }
+  .header .subtitle {
+    font-size: 1.15rem;
+    color: #636e72;
+    font-weight: 500;
+  }
+  .header .emoji-row {
+    font-size: 2.5rem;
+    margin-top: 10px;
+    letter-spacing: 8px;
+  }
+
+  /* ── SECTION ── */
+  .section {
+    margin-bottom: 50px;
+  }
+  .section-title {
+    font-size: 1.6rem;
+    font-weight: 800;
+    margin-bottom: 22px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .section-title .icon {
+    font-size: 1.8rem;
+  }
+  .section-title .line {
+    flex: 1;
+    height: 3px;
+    border-radius: 3px;
+  }
+
+  /* ── FLOW CARDS ── */
+  .flow-row {
+    display: flex;
+    gap: 0;
+    align-items: stretch;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .flow-card {
+    background: #fff;
+    border-radius: 18px;
+    padding: 22px 20px;
+    width: 200px;
+    text-align: center;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.07);
+    position: relative;
+    transition: transform 0.2s;
+  }
+  .flow-card:hover { transform: translateY(-4px); }
+  .flow-card .card-emoji { font-size: 2.4rem; margin-bottom: 8px; }
+  .flow-card h3 { font-size: 0.95rem; font-weight: 700; margin-bottom: 6px; }
+  .flow-card p { font-size: 0.78rem; color: #636e72; line-height: 1.45; }
+
+  .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.6rem;
+    color: #b2bec3;
+    min-width: 36px;
+    flex-shrink: 0;
+  }
+
+  /* ── GRID CARDS ── */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 18px;
+  }
+  .feature-card {
+    background: #fff;
+    border-radius: 18px;
+    padding: 24px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.07);
+    border-left: 5px solid;
+    transition: transform 0.2s;
+  }
+  .feature-card:hover { transform: translateY(-3px); }
+  .feature-card .card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .feature-card .card-head .emoji { font-size: 1.8rem; }
+  .feature-card .card-head h3 { font-size: 1rem; font-weight: 700; }
+  .feature-card p { font-size: 0.82rem; color: #636e72; line-height: 1.55; }
+  .feature-card code {
+    background: #f1f2f6;
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #6c5ce7;
+  }
+
+  /* ── COMMAND TABLE ── */
+  .cmd-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0 8px;
+  }
+  .cmd-table th {
+    text-align: left;
+    padding: 10px 16px;
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #b2bec3;
+  }
+  .cmd-table td {
+    background: #fff;
+    padding: 14px 16px;
+    font-size: 0.88rem;
+  }
+  .cmd-table tr td:first-child {
+    border-radius: 12px 0 0 12px;
+    font-weight: 700;
+    color: #6c5ce7;
+    font-family: monospace;
+    font-size: 0.85rem;
+  }
+  .cmd-table tr td:last-child { border-radius: 0 12px 12px 0; }
+  .cmd-table tr { box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
+
+  /* ── SCHEDULE TIMELINE ── */
+  .timeline {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 6px;
+    padding: 20px 0;
+    flex-wrap: wrap;
+  }
+  .time-slot {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 80px;
+  }
+  .time-slot .slot-emoji { font-size: 1.8rem; }
+  .time-slot .slot-time {
+    font-weight: 800;
+    font-size: 1.05rem;
+    color: #2d3436;
+  }
+  .time-slot .slot-label {
+    font-size: 0.72rem;
+    color: #636e72;
+    text-align: center;
+    font-weight: 600;
+  }
+  .time-slot .slot-bar {
+    width: 100%;
+    height: 6px;
+    border-radius: 4px;
+  }
+
+  /* ── CORRECTION FLOW (SPECIAL) ── */
+  .correction-flow {
+    background: linear-gradient(135deg, #fff3e0, #fff8e1);
+    border-radius: 22px;
+    padding: 30px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+  }
+  .correction-flow .step-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .correction-flow .step-row:last-child { margin-bottom: 0; }
+  .step-badge {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 0.9rem;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .step-text { font-size: 0.9rem; flex: 1; }
+  .step-text strong { color: #e17055; }
+
+  /* ── FOOTER ── */
+  .footer {
+    text-align: center;
+    margin-top: 50px;
+    padding: 20px;
+    color: #b2bec3;
+    font-size: 0.82rem;
+  }
+
+  /* ── COLOR CLASSES ── */
+  .c-red { border-color: #ff6b6b; }
+  .c-orange { border-color: #ffa502; }
+  .c-green { border-color: #2ed573; }
+  .c-blue { border-color: #1e90ff; }
+  .c-purple { border-color: #a55eea; }
+  .c-pink { border-color: #fd79a8; }
+
+  .bg-red { background: #ff6b6b; }
+  .bg-orange { background: #ffa502; }
+  .bg-green { background: #2ed573; }
+  .bg-blue { background: #1e90ff; }
+  .bg-purple { background: #a55eea; }
+
+  .line-red { background: linear-gradient(90deg, #ff6b6b, transparent); }
+  .line-orange { background: linear-gradient(90deg, #ffa502, transparent); }
+  .line-green { background: linear-gradient(90deg, #2ed573, transparent); }
+  .line-blue { background: linear-gradient(90deg, #1e90ff, transparent); }
+  .line-purple { background: linear-gradient(90deg, #a55eea, transparent); }
+  .line-pink { background: linear-gradient(90deg, #fd79a8, transparent); }
+
+  .bar-red { background: linear-gradient(90deg, #ff6b6b, #fab1a0); }
+  .bar-orange { background: linear-gradient(90deg, #ffa502, #ffeaa7); }
+  .bar-green { background: linear-gradient(90deg, #2ed573, #7bed9f); }
+  .bar-blue { background: linear-gradient(90deg, #1e90ff, #74b9ff); }
+  .bar-purple { background: linear-gradient(90deg, #a55eea, #d6a4ff); }
+  .bar-teal { background: linear-gradient(90deg, #00b894, #55efc4); }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 700px) {
+    .header h1 { font-size: 2rem; }
+    .flow-row { flex-direction: column; align-items: center; }
+    .arrow { transform: rotate(90deg); min-width: auto; min-height: 30px; }
+    .flow-card { width: 90%; }
+    .timeline { flex-direction: column; align-items: stretch; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- ═══ HEADER ═══ -->
+  <div class="header">
+    <div class="emoji-row">🍽️ 📸 📦 🎤 ✏️ 🏆</div>
+    <h1>FoodTracker Bot</h1>
+    <div class="subtitle">Your AI-powered Discord meal tracker — every feature explained</div>
+  </div>
+
+  <!-- ═══ 1. GETTING STARTED ═══ -->
+  <div class="section">
+    <div class="section-title">
+      <span class="icon">🚀</span> Getting Started
+      <div class="line line-green"></div>
+    </div>
+    <div class="flow-row">
+      <div class="flow-card">
+        <div class="card-emoji">👋</div>
+        <h3>Join the Server</h3>
+        <p>Get invited to the Discord server with FoodTracker bot</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">💬</div>
+        <h3>Type <code>!join</code></h3>
+        <p>In the group channel to create your private tracking channel</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">🎯</div>
+        <h3>Set Target</h3>
+        <p>Use <code>!target 2000</code> to set your daily kcal goal</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">🎉</div>
+        <h3>Start Tracking!</h3>
+        <p>Post meals in your private channel using any input method</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 2. FOUR INPUT METHODS ═══ -->
+  <div class="section">
+    <div class="section-title">
+      <span class="icon">📥</span> 4 Ways to Log Meals
+      <div class="line line-blue"></div>
+    </div>
+    <div class="card-grid">
+      <div class="feature-card c-red">
+        <div class="card-head">
+          <span class="emoji">📸</span>
+          <h3>Food Photo</h3>
+        </div>
+        <p>Snap a picture of your meal and post it. <strong>GPT-4o Vision</strong> identifies every food item, estimates portions, and calculates macros + calories automatically.</p>
+      </div>
+      <div class="feature-card c-orange">
+        <div class="card-head">
+          <span class="emoji">📦</span>
+          <h3>Barcode Scan</h3>
+        </div>
+        <p>Photograph a product barcode. The bot decodes it, looks up <strong>Open Food Facts</strong> for exact nutrition data. Add quantity modifiers like <code>half</code>, <code>2 servings</code>, or <code>50g</code>.</p>
+      </div>
+      <div class="feature-card c-green">
+        <div class="card-head">
+          <span class="emoji">✍️</span>
+          <h3>Text Description</h3>
+        </div>
+        <p>Just type what you ate: <em>"two scrambled eggs, toast with butter, and a coffee"</em>. <strong>Claude AI</strong> estimates the macros and kcal from your description.</p>
+      </div>
+      <div class="feature-card c-blue">
+        <div class="card-head">
+          <span class="emoji">🎤</span>
+          <h3>Voice Message</h3>
+        </div>
+        <p>Record a voice note describing your meal. <strong>OpenAI Whisper</strong> transcribes it, then Claude analyzes the text for full nutrition breakdown.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 3. PHOTO ANALYSIS WORKFLOW ═══ -->
+  <div class="section">
+    <div class="section-title">
+      <span class="icon">🔬</span> Photo Analysis Workflow
+      <div class="line line-red"></div>
+    </div>
+    <div class="flow-row">
+      <div class="flow-card">
+        <div class="card-emoji">📷</div>
+        <h3>Upload Photo</h3>
+        <p>Post image in your private channel</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">🔍</div>
+        <h3>Barcode Check</h3>
+        <p>Bot scans for barcodes first using pyzbar</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">🤖</div>
+        <h3>AI Analysis</h3>
+        <p>If no barcode: GPT-4o Vision analyzes the food</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">📊</div>
+        <h3>Results</h3>
+        <p>Nutrition embed + budget update + group feed</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 4. BARCODE WORKFLOW ═══ -->
+  <div class="section">
+    <div class="section-title">
+      <span class="icon">📦</span> Barcode Scan Workflow
+      <div class="line line-orange"></div>
+    </div>
+    <div class="flow-row">
+      <div class="flow-card">
+        <div class="card-emoji">📷</div>
+        <h3>Photo + Quantity</h3>
+        <p>Upload barcode photo, optionally type <code>half</code> or <code>2 spoons</code></p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">📦</div>
+        <h3>Decode Barcode</h3>
+        <p>pyzbar extracts barcode number from image</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">🌍</div>
+        <h3>Open Food Facts</h3>
+        <p>Lookup product name, brand, per-serving macros</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">✖️</div>
+        <h3>Apply Modifier</h3>
+        <p>Multiply nutrition by quantity (0.5×, 2×, etc.)</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 5. CORRECTION WORKFLOW ═══ -->
+  <div class="section">
+    <div class="section-title">
+      <span class="icon">✏️</span> Correction Workflow
+      <div class="line line-purple"></div>
+    </div>
+    <div class="correction-flow">
+      <div class="step-row">
+        <div class="step-badge bg-purple">1</div>
+        <div class="step-text">Bot posts a <strong>📊 Nutrition Breakdown</strong> embed after analyzing your meal</div>
+      </div>
+      <div class="step-row">
+        <div class="step-badge bg-blue">2</div>
+        <div class="step-text"><strong>Reply</strong> to that embed with text or voice: <em>"the steak is 200g not 300g, the radish are tomatoes"</em></div>
+      </div>
+      <div class="step-row">
+        <div class="step-badge bg-green">3</div>
+        <div class="step-text">Bot detects it's a correction → sends original analysis + your changes to <strong>Claude AI</strong></div>
+      </div>
+      <div class="step-row">
+        <div class="step-badge bg-orange">4</div>
+        <div class="step-text">Claude re-evaluates the entire meal with corrections applied → <strong>updates the database</strong></div>
+      </div>
+      <div class="step-row">
+        <div class="step-badge bg-red">5</div>
+        <div class="step-text">Bot replies with a <strong>✏️ Corrected Nutrition Breakdown</strong> (orange embed) + updated daily budget</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 6. DAILY SCHEDULE ═══ -->
+  <div class="section">
+    <div class="section-title">
+      <span class="icon">🗓️</span> Daily Schedule (Berlin Time)
+      <div class="line line-pink"></div>
+    </div>
+    <div class="timeline">
+      <div class="time-slot">
+        <div class="slot-emoji">📋</div>
+        <div class="slot-time">04:00</div>
+        <div class="slot-label">Daily Summary<br>+ Leaderboard</div>
+        <div class="slot-bar bar-purple"></div>
+      </div>
+      <div class="time-slot">
+        <div class="slot-emoji">🌅</div>
+        <div class="slot-time">08:00</div>
+        <div class="slot-label">Breakfast<br>Reminder</div>
+        <div class="slot-bar bar-red"></div>
+      </div>
+      <div class="time-slot">
+        <div class="slot-emoji">🍎</div>
+        <div class="slot-time">11:00</div>
+        <div class="slot-label">Morning<br>Snack</div>
+        <div class="slot-bar bar-orange"></div>
+      </div>
+      <div class="time-slot">
+        <div class="slot-emoji">🥗</div>
+        <div class="slot-time">14:00</div>
+        <div class="slot-label">Lunch<br>Reminder</div>
+        <div class="slot-bar bar-green"></div>
+      </div>
+      <div class="time-slot">
+        <div class="slot-emoji">🍌</div>
+        <div class="slot-time">17:00</div>
+        <div class="slot-label">Afternoon<br>Snack</div>
+        <div class="slot-bar bar-blue"></div>
+      </div>
+      <div class="time-slot">
+        <div class="slot-emoji">🍽️</div>
+        <div class="slot-time">20:00</div>
+        <div class="slot-label">Dinner<br>Reminder</div>
+        <div class="slot-bar bar-teal"></div>
+      </div>
+      <div class="time-slot">
+        <div class="slot-emoji">🌙</div>
+        <div class="slot-time">23:00</div>
+        <div class="slot-label">Evening<br>Snack</div>
+        <div class="slot-bar bar-purple"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 7. BUDGET TRACKING ═══ -->
+  <div class="section">
+    <div class="section-title">
+      <span class="icon">🎯</span> Smart Budget Tracking
+      <div class="line line-orange"></div>
+    </div>
+    <div class="card-grid">
+      <div class="feature-card c-orange">
+        <div class="card-head">
+          <span class="emoji">📊</span>
+          <h3>Auto Budget After Each Meal</h3>
+        </div>
+        <p>Every time you log a meal, the bot instantly shows your <strong>remaining kcal</strong>, divided evenly across your remaining meal windows for the day.</p>
+      </div>
+      <div class="feature-card c-green">
+        <div class="card-head">
+          <span class="emoji">🔥</span>
+          <h3>Body Fat Calculation</h3>
+        </div>
+        <p>At end of day, calculates how much <strong>body fat you burned</strong> (or gained) based on your deficit/surplus. Uses the 7,700 kcal = 1kg fat formula.</p>
+      </div>
+      <div class="feature-card c-purple">
+        <div class="card-head">
+          <span class="emoji">⏰</span>
+          <h3>6 Meal Windows</h3>
+        </div>
+        <p>Day runs <strong>4am → 3:59am</strong>. Six windows: Breakfast (8–11), Morning Snack (11–14), Lunch (14–17), Afternoon Snack (17–20), Dinner (20–23), Evening (23–4).</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 8. MULTI-USER & SOCIAL ═══ -->
+  <div class="section">
+    <div class="section-title">
+      <span class="icon">👥</span> Multi-User & Social
+      <div class="line line-blue"></div>
+    </div>
+    <div class="flow-row">
+      <div class="flow-card">
+        <div class="card-emoji">🔒</div>
+        <h3>Private Channels</h3>
+        <p>Each user gets their own channel for meal photos — only they + the bot can see it</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">📢</div>
+        <h3>Group Feed</h3>
+        <p>Every meal posts a summary to the shared group channel with kcal + macros</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">🏆</div>
+        <h3>Leaderboard</h3>
+        <p>Daily rankings — who's closest to their calorie target wins!</p>
+      </div>
+      <div class="arrow">→</div>
+      <div class="flow-card">
+        <div class="card-emoji">📋</div>
+        <h3>4am Summary</h3>
+        <p>Personal summary + group leaderboard posted daily at 4am</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 9. ALL COMMANDS ═══ -->
+  <div class="section">
+    <div class="section-title">
+      <span class="icon">⌨️</span> All Commands
+      <div class="line line-purple"></div>
+    </div>
+    <table class="cmd-table">
+      <thead>
+        <tr><th>Command</th><th>What It Does</th><th>Where</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>!join</td><td>Creates your private food tracking channel</td><td>Group channel</td></tr>
+        <tr><td>!target &lt;kcal&gt;</td><td>Set your daily calorie goal (e.g. <code>!target 2000</code>)</td><td>Anywhere</td></tr>
+        <tr><td>!budget</td><td>View remaining kcal split across meal windows</td><td>Private channel</td></tr>
+        <tr><td>!today</td><td>List all meals logged today with numbered list</td><td>Private channel</td></tr>
+        <tr><td>!undo</td><td>Remove the most recent meal entry</td><td>Private channel</td></tr>
+        <tr><td>!delete &lt;#&gt;</td><td>Delete a specific meal by number from <code>!today</code></td><td>Private channel</td></tr>
+        <tr><td>!edit &lt;#&gt; kcal=X ...</td><td>Manually edit a meal's kcal, protein, carbs, fat</td><td>Private channel</td></tr>
+        <tr><td>!analyze</td><td>Reply to a food photo to re-analyze it with AI</td><td>Private channel</td></tr>
+        <tr><td>!leaderboard</td><td>Show today's group rankings by target accuracy</td><td>Anywhere</td></tr>
+        <tr><td>!schedule</td><td>Display the reminder schedule with times</td><td>Anywhere</td></tr>
+        <tr><td>!commands</td><td>Show the full welcome overview + all commands</td><td>Anywhere</td></tr>
+        <tr><td>!ping</td><td>Health check — shows bot latency in ms</td><td>Anywhere</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ═══ 10. TECH STACK ═══ -->
+  <div class="section">
+    <div class="section-title">
+      <span class="icon">⚙️</span> Tech Stack
+      <div class="line line-green"></div>
+    </div>
+    <div class="card-grid">
+      <div class="feature-card c-blue">
+        <div class="card-head">
+          <span class="emoji">🐍</span>
+          <h3>Python + discord.py</h3>
+        </div>
+        <p>Bot framework with privileged intents for message content and member events.</p>
+      </div>
+      <div class="feature-card c-purple">
+        <div class="card-head">
+          <span class="emoji">🧠</span>
+          <h3>Claude AI (Anthropic)</h3>
+        </div>
+        <p>Text meal analysis, quantity interpretation, and correction re-evaluation.</p>
+      </div>
+      <div class="feature-card c-green">
+        <div class="card-head">
+          <span class="emoji">👁️</span>
+          <h3>GPT-4o Vision (OpenAI)</h3>
+        </div>
+        <p>Food photo analysis — identifies items, estimates portions, calculates macros.</p>
+      </div>
+      <div class="feature-card c-orange">
+        <div class="card-head">
+          <span class="emoji">🗣️</span>
+          <h3>Whisper (OpenAI)</h3>
+        </div>
+        <p>Voice message transcription for hands-free meal logging.</p>
+      </div>
+      <div class="feature-card c-red">
+        <div class="card-head">
+          <span class="emoji">📦</span>
+          <h3>Open Food Facts</h3>
+        </div>
+        <p>Free barcode database for exact product nutrition (no API key needed).</p>
+      </div>
+      <div class="feature-card c-pink">
+        <div class="card-head">
+          <span class="emoji">🚂</span>
+          <h3>Railway + SQLite</h3>
+        </div>
+        <p>Hosted on Railway with persistent SQLite volume for meal & user data.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ FOOTER ═══ -->
+  <div class="footer">
+    🍽️ FoodTracker Bot — Built with Python, Claude AI, GPT-4o Vision & Whisper<br>
+    Track meals • Hit your goals • Compete with friends
+  </div>
+
+</div>
+</body>
+</html>

@@ -88,7 +88,12 @@ def init_db():
             user_id         TEXT PRIMARY KEY,
             target_kcal     INTEGER NOT NULL DEFAULT 2000,
             display_name    TEXT,
-            private_channel INTEGER
+            private_channel INTEGER,
+            is_premium      INTEGER NOT NULL DEFAULT 0,
+            premium_since   TEXT,
+            trial_started   TEXT,
+            photo_count_today INTEGER NOT NULL DEFAULT 0,
+            photo_count_day  TEXT
         );
         CREATE TABLE IF NOT EXISTS meals (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,6 +110,19 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_meals_user_day ON meals(user_id, day_key);
     """)
+    # Migration: add premium columns if they don't exist yet
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(user_settings)").fetchall()}
+    migrations = {
+        "is_premium": "ALTER TABLE user_settings ADD COLUMN is_premium INTEGER NOT NULL DEFAULT 0",
+        "premium_since": "ALTER TABLE user_settings ADD COLUMN premium_since TEXT",
+        "trial_started": "ALTER TABLE user_settings ADD COLUMN trial_started TEXT",
+        "photo_count_today": "ALTER TABLE user_settings ADD COLUMN photo_count_today INTEGER NOT NULL DEFAULT 0",
+        "photo_count_day": "ALTER TABLE user_settings ADD COLUMN photo_count_day TEXT",
+    }
+    for col, sql in migrations.items():
+        if col not in existing_cols:
+            conn.execute(sql)
+            log.info("Migrated: added column %s to user_settings", col)
     conn.commit()
     conn.close()
     log.info("Database initialized at %s", DB_PATH)
@@ -308,6 +326,128 @@ def get_day_totals(user_id: str, day_key: str) -> dict:
     return dict(row)
 
 # ---------------------------------------------------------------------------
+# Premium / subscription helpers
+# ---------------------------------------------------------------------------
+PREMIUM_PRICE = "$2.99/month"
+DAILY_PHOTO_CAP = 8
+TRIAL_DAYS = 7
+
+def is_premium(user_id: str) -> bool:
+    """Check if a user has an active premium subscription or trial."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT is_premium, trial_started FROM user_settings WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return False
+    if row["is_premium"]:
+        return True
+    # Check trial
+    trial = row["trial_started"]
+    if trial:
+        trial_dt = datetime.fromisoformat(trial)
+        if (now_tz() - trial_dt).days < TRIAL_DAYS:
+            return True
+    return False
+
+def get_trial_days_left(user_id: str) -> int | None:
+    """Return remaining trial days, or None if no trial / expired."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT trial_started, is_premium FROM user_settings WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    if not row or row["is_premium"]:
+        return None
+    trial = row["trial_started"]
+    if not trial:
+        return None
+    elapsed = (now_tz() - datetime.fromisoformat(trial)).days
+    remaining = TRIAL_DAYS - elapsed
+    return remaining if remaining > 0 else None
+
+def start_trial(user_id: str):
+    """Start the 7-day free trial for a user."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE user_settings SET trial_started = ? WHERE user_id = ?",
+        (now_tz().isoformat(), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+def set_premium(user_id: str, active: bool):
+    """Set or remove premium status for a user."""
+    conn = get_db()
+    conn.execute(
+        "UPDATE user_settings SET is_premium = ?, premium_since = ? WHERE user_id = ?",
+        (1 if active else 0, now_tz().isoformat() if active else None, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+def check_photo_cap(user_id: str) -> tuple[bool, int]:
+    """Check if user is under the daily photo cap. Returns (allowed, remaining)."""
+    day_key = get_food_day(now_tz())
+    conn = get_db()
+    row = conn.execute(
+        "SELECT photo_count_today, photo_count_day FROM user_settings WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return True, DAILY_PHOTO_CAP
+
+    count = row["photo_count_today"] or 0
+    count_day = row["photo_count_day"] or ""
+
+    # Reset if it's a new day
+    if count_day != day_key:
+        count = 0
+        conn.execute(
+            "UPDATE user_settings SET photo_count_today = 0, photo_count_day = ? WHERE user_id = ?",
+            (day_key, user_id),
+        )
+        conn.commit()
+
+    conn.close()
+    remaining = DAILY_PHOTO_CAP - count
+    return count < DAILY_PHOTO_CAP, max(0, remaining)
+
+def increment_photo_count(user_id: str):
+    """Increment the daily photo analysis counter."""
+    day_key = get_food_day(now_tz())
+    conn = get_db()
+    conn.execute(
+        "UPDATE user_settings SET photo_count_today = photo_count_today + 1, photo_count_day = ? WHERE user_id = ?",
+        (day_key, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+PREMIUM_UPSELL = f"""✨ **This is a Premium feature!**
+
+Photo analysis, voice messages, barcode scanning, and meal corrections are part of **FoodTracker Pro** ({PREMIUM_PRICE}).
+
+**What you get with Pro:**
+📸 AI photo analysis (up to {DAILY_PHOTO_CAP}/day)
+🎤 Voice message meal logging
+📦 Barcode scanning with quantity modifiers
+✏️ Reply-based meal corrections
+🔄 Photo reanalysis (`!analyze`)
+
+**Free tier includes:**
+✍️ Unlimited text-based meal logging
+🎯 Calorie budget tracking
+🏆 Leaderboard & daily summaries
+⏰ 6x daily reminders
+
+Type `!trial` to start your **free {TRIAL_DAYS}-day trial** — no payment needed!"""
+
+# ---------------------------------------------------------------------------
 # AI clients
 # ---------------------------------------------------------------------------
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -379,6 +519,11 @@ async def analyze_food_image(image_bytes: bytes, media_type: str = "image/jpeg")
             },
         ],
     )
+    # --- COST LOGGING ---
+    u = response.usage
+    cost = (u.prompt_tokens * 2.50 + u.completion_tokens * 10.00) / 1_000_000
+    log.info(f"[COST] photo_analysis | in={u.prompt_tokens} out={u.completion_tokens} | ${cost:.6f}")
+    # --- END COST LOGGING ---
     return response.choices[0].message.content
 
 
@@ -410,6 +555,11 @@ async def analyze_food_text(description: str) -> str:
             }
         ],
     )
+    # --- COST LOGGING ---
+    u = message.usage
+    cost = (u.input_tokens * 3.00 + u.output_tokens * 15.00) / 1_000_000
+    log.info(f"[COST] text_analysis | in={u.input_tokens} out={u.output_tokens} | ${cost:.6f}")
+    # --- END COST LOGGING ---
     return message.content[0].text
 
 
@@ -455,6 +605,11 @@ async def reevaluate_meal(original_analysis: str, corrections: str) -> str:
             }
         ],
     )
+    # --- COST LOGGING ---
+    u = message.usage
+    cost = (u.input_tokens * 3.00 + u.output_tokens * 15.00) / 1_000_000
+    log.info(f"[COST] correction | in={u.input_tokens} out={u.output_tokens} | ${cost:.6f}")
+    # --- END COST LOGGING ---
     return message.content[0].text
 
 
@@ -470,11 +625,20 @@ async def transcribe_audio(audio_bytes: bytes, filename: str) -> str:
         tmp_path = tmp.name
 
     try:
+        # Estimate audio duration from file size for cost logging
+        # Discord voice messages are Ogg/Opus ~6KB/sec on average
+        audio_size_bytes = len(audio_bytes)
+        est_duration_sec = audio_size_bytes / 6000  # rough estimate
         with open(tmp_path, "rb") as audio_file:
             transcript = openai_client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
             )
+        # --- COST LOGGING ---
+        est_minutes = est_duration_sec / 60
+        cost = est_minutes * 0.006
+        log.info(f"[COST] whisper_transcription | ~{est_duration_sec:.1f}s (~{est_minutes:.2f}min) | size={audio_size_bytes}B | ${cost:.6f}")
+        # --- END COST LOGGING ---
         return transcript.text
     finally:
         os.unlink(tmp_path)
@@ -612,6 +776,11 @@ async def interpret_quantity_with_ai(text: str, product_name: str, portion_note:
         ),
         messages=[{"role": "user", "content": text}],
     )
+    # --- COST LOGGING ---
+    u = message.usage
+    cost = (u.input_tokens * 3.00 + u.output_tokens * 15.00) / 1_000_000
+    log.info(f"[COST] quantity_interpret | in={u.input_tokens} out={u.output_tokens} | ${cost:.6f}")
+    # --- END COST LOGGING ---
     try:
         return float(message.content[0].text.strip())
     except ValueError:
@@ -754,6 +923,8 @@ e.g. *"the steak is 200g not 300g, the radish are tomatoes"*
 `!analyze` — Reply to a food photo to (re-)analyze it
 `!leaderboard` — See today's group rankings
 `!schedule` — View the reminder schedule
+`!pro` — View Pro features and your subscription status
+`!trial` — Start a free 7-day Pro trial
 `!commands` — Show this list again"""
 
 
@@ -1053,16 +1224,23 @@ async def on_message(message: discord.Message):
             await bot.process_commands(message)
             return
 
-        # --- REPLY-BASED CORRECTION ---
+        user_id = str(message.author.id)
+        user_is_premium = is_premium(user_id)
+
+        # --- REPLY-BASED CORRECTION (Premium) ---
         # If user replies to a bot's Nutrition Breakdown embed, treat as correction
         if message.reference and message.reference.resolved:
             ref_msg = message.reference.resolved
-            is_correction = (
+            is_correction_reply = (
                 ref_msg.author == bot.user
                 and ref_msg.embeds
                 and any("Nutrition Breakdown" in (e.title or "") for e in ref_msg.embeds)
             )
-            if is_correction:
+            if is_correction_reply:
+                if not user_is_premium:
+                    await _send_premium_upsell(message, "Meal corrections")
+                    await bot.process_commands(message)
+                    return
                 await _handle_correction(message)
                 await bot.process_commands(message)
                 return
@@ -1081,8 +1259,18 @@ async def on_message(message: discord.Message):
         has_images = bool(image_attachments)
         has_audio = bool(audio_attachments)
 
-        # --- IMAGE INPUT ---
+        # --- IMAGE INPUT (Premium) ---
         if has_images:
+            if not user_is_premium:
+                await _send_premium_upsell(message, "Photo analysis")
+                await bot.process_commands(message)
+                return
+            # Check daily photo cap
+            allowed, remaining = check_photo_cap(user_id)
+            if not allowed:
+                await message.reply(f"📸 You've hit your daily photo limit ({DAILY_PHOTO_CAP}/day). Try logging via text instead, or wait until tomorrow!\n\n*Your limit resets at 4am.*")
+                await bot.process_commands(message)
+                return
             for attachment in image_attachments:
                 log.info("Food photo from %s: %s", message.author, attachment.filename)
                 async with message.channel.typing():
@@ -1113,6 +1301,7 @@ async def on_message(message: discord.Message):
                                     f"barcode: {barcode} ({product['name']}) x{multiplier:.2g}",
                                     thumbnail_url=thumb,
                                 )
+                                increment_photo_count(user_id)
                                 continue
                             else:
                                 await message.reply(f"📦 Barcode `{barcode}` detected but not found in Open Food Facts. Analyzing the image instead...")
@@ -1130,12 +1319,17 @@ async def on_message(message: discord.Message):
                             message, analysis, attachment.filename,
                             thumbnail_url=attachment.url,
                         )
+                        increment_photo_count(user_id)
                     except Exception as e:
                         log.exception("Error analyzing image")
                         await message.reply(f"⚠️ Couldn't analyze that image: {e}")
 
-        # --- AUDIO / VOICE MESSAGE INPUT ---
+        # --- AUDIO / VOICE MESSAGE INPUT (Premium) ---
         elif has_audio:
+            if not user_is_premium:
+                await _send_premium_upsell(message, "Voice message logging")
+                await bot.process_commands(message)
+                return
             attachment = audio_attachments[0]
             log.info("Voice message from %s: %s", message.author, attachment.filename)
             async with message.channel.typing():
@@ -1243,6 +1437,20 @@ async def _process_meal_analysis(
         if thumbnail_url:
             group_embed.set_thumbnail(url=thumbnail_url)
         await group_channel.send(embed=group_embed)
+
+
+async def _send_premium_upsell(message: discord.Message, feature_name: str):
+    """Send a premium upsell embed when a free user tries a premium feature."""
+    embed = discord.Embed(
+        title=f"✨  {feature_name} — Premium Feature",
+        description=PREMIUM_UPSELL,
+        color=discord.Color.purple(),
+        timestamp=now_tz(),
+    )
+    trial_left = get_trial_days_left(str(message.author.id))
+    if trial_left is not None:
+        embed.set_footer(text=f"Trial: {trial_left} days remaining")
+    await message.reply(embed=embed)
 
 
 async def _handle_correction(message: discord.Message):
@@ -1627,6 +1835,15 @@ async def cmd_edit(ctx: commands.Context, meal_num: int = None, *, values: str =
 @bot.command(name="analyze")
 async def cmd_analyze(ctx: commands.Context):
     """Reply to a message with a food photo using !analyze to re-analyze it."""
+    user_id = str(ctx.author.id)
+    if not is_premium(user_id):
+        embed = discord.Embed(
+            title="✨  Photo Reanalysis — Premium Feature",
+            description=PREMIUM_UPSELL,
+            color=discord.Color.purple(),
+        )
+        await ctx.reply(embed=embed)
+        return
     ref = ctx.message.reference
     if ref is None or ref.resolved is None:
         await ctx.reply("Reply to a message that contains a food photo with `!analyze`.")
@@ -1681,6 +1898,104 @@ async def cmd_ping(ctx: commands.Context):
 async def cmd_commands(ctx: commands.Context):
     """Show all available commands."""
     await ctx.reply(embed=build_welcome_embed())
+
+
+@bot.command(name="pro")
+async def cmd_pro(ctx: commands.Context):
+    """Show premium features and upgrade info."""
+    user_id = str(ctx.author.id)
+    if is_premium(user_id):
+        trial_left = get_trial_days_left(user_id)
+        if trial_left is not None:
+            status = f"🎁 You're on a free trial — **{trial_left} days remaining**"
+        else:
+            status = "✅ You're a **Pro** member! All features unlocked."
+        allowed, remaining = check_photo_cap(user_id)
+        status += f"\n📸 Photo analyses today: {DAILY_PHOTO_CAP - remaining}/{DAILY_PHOTO_CAP}"
+        embed = discord.Embed(
+            title="✨  FoodTracker Pro",
+            description=status,
+            color=discord.Color.green(),
+            timestamp=now_tz(),
+        )
+    else:
+        embed = discord.Embed(
+            title="✨  FoodTracker Pro",
+            description=PREMIUM_UPSELL,
+            color=discord.Color.purple(),
+            timestamp=now_tz(),
+        )
+    await ctx.reply(embed=embed)
+
+
+@bot.command(name="trial")
+async def cmd_trial(ctx: commands.Context):
+    """Start a free 7-day trial of FoodTracker Pro."""
+    user_id = str(ctx.author.id)
+
+    if is_premium(user_id):
+        trial_left = get_trial_days_left(user_id)
+        if trial_left is not None:
+            await ctx.reply(f"🎁 You're already on a trial — **{trial_left} days remaining**. Enjoy!")
+        else:
+            await ctx.reply("✅ You already have Pro! All features are unlocked.")
+        return
+
+    # Check if trial was already used (trial_started exists but expired)
+    conn = get_db()
+    row = conn.execute("SELECT trial_started FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    if row and row["trial_started"]:
+        await ctx.reply(
+            f"Your free trial has expired. Upgrade to **FoodTracker Pro** for {PREMIUM_PRICE} to keep using photo analysis, voice logging, barcode scanning, and corrections!\n\n"
+            "*(Discord Premium App subscriptions coming soon — for now, ask a server admin to activate your Pro status with `!setpremium @user`)*"
+        )
+        return
+
+    start_trial(user_id)
+    embed = discord.Embed(
+        title="🎉  Free Trial Activated!",
+        description=(
+            f"You now have **{TRIAL_DAYS} days** of full FoodTracker Pro access!\n\n"
+            "**Unlocked features:**\n"
+            f"📸 AI photo analysis (up to {DAILY_PHOTO_CAP}/day)\n"
+            "🎤 Voice message meal logging\n"
+            "📦 Barcode scanning with quantity modifiers\n"
+            "✏️ Reply-based meal corrections\n"
+            "🔄 Photo reanalysis\n\n"
+            "Start by snapping a photo of your next meal!"
+        ),
+        color=discord.Color.green(),
+        timestamp=now_tz(),
+    )
+    await ctx.reply(embed=embed)
+
+
+@bot.command(name="setpremium")
+async def cmd_setpremium(ctx: commands.Context, member: discord.Member = None):
+    """Admin command: activate Pro for a user. Usage: !setpremium @user"""
+    # Only allow server admins
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.reply("⚠️ Only server admins can use this command.")
+        return
+    if member is None:
+        await ctx.reply("Usage: `!setpremium @user` to activate Pro for someone.")
+        return
+    set_premium(str(member.id), True)
+    await ctx.reply(f"✅ **{member.display_name}** is now a FoodTracker Pro member!")
+
+
+@bot.command(name="removepremium")
+async def cmd_removepremium(ctx: commands.Context, member: discord.Member = None):
+    """Admin command: remove Pro from a user. Usage: !removepremium @user"""
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.reply("⚠️ Only server admins can use this command.")
+        return
+    if member is None:
+        await ctx.reply("Usage: `!removepremium @user` to remove Pro from someone.")
+        return
+    set_premium(str(member.id), False)
+    await ctx.reply(f"🔒 **{member.display_name}** has been removed from FoodTracker Pro.")
 
 
 # ---------------------------------------------------------------------------
