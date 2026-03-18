@@ -1,13 +1,21 @@
 import { Pool, QueryResult } from 'pg';
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes('railway.internal') ? false : { rejectUnauthorized: false },
-  max: 5,
-});
+// Lazy pool — only created on first query (not at import/build time)
+let _pool: Pool | null = null;
+
+function getPool(): Pool {
+  if (!_pool) {
+    _pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL?.includes('railway.internal') ? false : { rejectUnauthorized: false },
+      max: 5,
+    });
+  }
+  return _pool;
+}
 
 export async function query(text: string, params?: any[]): Promise<QueryResult> {
-  const client = await pool.connect();
+  const client = await getPool().connect();
   try {
     const result = await client.query(text, params);
     return result;
