@@ -305,6 +305,19 @@ def _init_sqlite_schema(conn):
             timestamp TEXT NOT NULL,
             UNIQUE(user_id, day_key)
         );
+        CREATE TABLE IF NOT EXISTS meal_templates (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            kcal        INTEGER NOT NULL,
+            protein_g   REAL NOT NULL DEFAULT 0,
+            carbs_g     REAL NOT NULL DEFAULT 0,
+            fat_g       REAL NOT NULL DEFAULT 0,
+            water_ml    INTEGER NOT NULL DEFAULT 0,
+            description TEXT,
+            created_at  TEXT NOT NULL,
+            UNIQUE(user_id, name)
+        );
     """)
     # Migration: add premium columns if they don't exist yet
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(user_settings)").fetchall()}
@@ -401,6 +414,19 @@ def _init_pg_schema(conn):
             method    TEXT NOT NULL DEFAULT 'navy',
             timestamp TEXT NOT NULL,
             UNIQUE(user_id, day_key)
+        );
+        CREATE TABLE IF NOT EXISTS meal_templates (
+            id          SERIAL PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            kcal        INTEGER NOT NULL,
+            protein_g   REAL NOT NULL DEFAULT 0,
+            carbs_g     REAL NOT NULL DEFAULT 0,
+            fat_g       REAL NOT NULL DEFAULT 0,
+            water_ml    INTEGER NOT NULL DEFAULT 0,
+            description TEXT,
+            created_at  TEXT NOT NULL,
+            UNIQUE(user_id, name)
         );
     """)
     conn.commit()
@@ -970,6 +996,56 @@ def get_day_totals(user_id: str, day_key: str) -> dict:
     )
     release_db(conn)
     return dict(row)
+
+# ---------------------------------------------------------------------------
+# Meal templates helpers
+# ---------------------------------------------------------------------------
+
+def save_meal_template(user_id: str, name: str, kcal: int, protein: float, carbs: float, fat: float, water_ml: int = 0, description: str = "") -> bool:
+    """Save a meal as a template. Returns True if new, False if updated."""
+    conn = get_db()
+    try:
+        db_execute(conn,
+            "INSERT INTO meal_templates (user_id, name, kcal, protein_g, carbs_g, fat_g, water_ml, description, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, name.lower().strip(), kcal, protein, carbs, fat, water_ml, description, now_tz().isoformat()))
+        conn.commit()
+        release_db(conn)
+        return True
+    except (sqlite3.IntegrityError, psycopg2.IntegrityError):
+        db_execute(conn,
+            "UPDATE meal_templates SET kcal = ?, protein_g = ?, carbs_g = ?, fat_g = ?, water_ml = ?, description = ?, created_at = ? "
+            "WHERE user_id = ? AND name = ?",
+            (kcal, protein, carbs, fat, water_ml, description, now_tz().isoformat(), user_id, name.lower().strip()))
+        conn.commit()
+        release_db(conn)
+        return False
+    except Exception as e:
+        release_db(conn)
+        raise
+
+def get_meal_template(user_id: str, name: str) -> dict | None:
+    """Get a meal template by name."""
+    conn = get_db()
+    row = db_fetchone(conn, "SELECT * FROM meal_templates WHERE user_id = ? AND name = ?", (user_id, name.lower().strip()))
+    release_db(conn)
+    return dict(row) if row else None
+
+def get_all_templates(user_id: str) -> list[dict]:
+    """Get all meal templates for a user."""
+    conn = get_db()
+    rows = db_fetchall(conn, "SELECT * FROM meal_templates WHERE user_id = ? ORDER BY name", (user_id,))
+    release_db(conn)
+    return [dict(r) for r in rows]
+
+def delete_template(user_id: str, name: str) -> bool:
+    """Delete a meal template. Returns True if deleted."""
+    conn = get_db()
+    cur = db_execute(conn, "DELETE FROM meal_templates WHERE user_id = ? AND name = ?", (user_id, name.lower().strip()))
+    deleted = cur.rowcount > 0
+    conn.commit()
+    release_db(conn)
+    return deleted
 
 # ---------------------------------------------------------------------------
 # Premium / subscription helpers
@@ -1843,6 +1919,9 @@ e.g. *"the steak is 200g not 300g, the radish are tomatoes"*
 `!macros protein=X fat=X` — Set macro targets (carbs auto-calculated)
 `!weight 82.5` — Log your weight (kg)
 `!water 250` — Log water intake (ml)
+`!save <name>` — Save your last meal as a template
+`!meal <name>` — Quick-log a saved template
+`!templates` — List your saved templates
 `!streak` — View your streak of days on target
 `!weekly` — Weekly summary report with trends
 `!monthly` — Monthly summary report
@@ -3197,6 +3276,9 @@ INFO_PAGES = [
             "`!water 250` — Log water (ml)\n"
             "`!budget` — Remaining kcal + macros + water\n"
             "`!today` — See all meals logged today\n"
+            "`!save breakfast` — Save last meal as template\n"
+            "`!meal breakfast` — Quick-log a saved template\n"
+            "`!templates` — List your saved templates\n"
             "`!streak` — View your target streak\n"
             "`!weekly` — Weekly summary report\n"
             "`!monthly` — Monthly summary report\n"
@@ -4163,6 +4245,7 @@ async def cmd_deletedata(ctx: commands.Context, confirm: str = None):
         db_execute(conn, "DELETE FROM weight_log WHERE user_id = ?", (user_id,))
         db_execute(conn, "DELETE FROM water_log WHERE user_id = ?", (user_id,))
         db_execute(conn, "DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
+        db_execute(conn, "DELETE FROM meal_templates WHERE user_id = ?", (user_id,))
         db_execute(conn, "DELETE FROM user_settings WHERE user_id = ?", (user_id,))
         conn.commit()
         log.info("GDPR deletion: user %s deleted all data", user_id)
@@ -4173,6 +4256,134 @@ async def cmd_deletedata(ctx: commands.Context, confirm: str = None):
         "✅ **All your data has been permanently deleted.**\n"
         "You can re-register anytime by messaging me `!join`."
     )
+
+
+@bot.command(name="save")
+async def cmd_save(ctx: commands.Context, *, name: str = None):
+    """Save last meal or a specific meal as a template. Usage: !save breakfast"""
+    user_id = str(ctx.author.id)
+
+    if name is None:
+        await ctx.reply("Usage: `!save <name>` — saves your last meal as a reusable template\nExample: `!save breakfast` or `!save chicken-rice`")
+        return
+
+    # Get the last meal for today (or yesterday if near day boundary)
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    last = get_last_meal(user_id, day_key)
+    if not last:
+        prev_day = (datetime.strptime(day_key, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        last = get_last_meal(user_id, prev_day)
+
+    if not last:
+        await ctx.reply("No recent meals to save. Log a meal first, then `!save <name>`.")
+        return
+
+    is_new = save_meal_template(
+        user_id, name,
+        last["kcal"], last["protein_g"], last["carbs_g"], last["fat_g"],
+        last.get("water_ml", 0), last.get("description", "")
+    )
+
+    action = "Saved" if is_new else "Updated"
+    await ctx.reply(
+        "ACTION: " + action + " template **" + name + "**\n"
+        "FIRE: " + str(last['kcal']) + " kcal | MUSCLE: " + str(int(last['protein_g'])) + "g P | CARBS: " + str(int(last['carbs_g'])) + "g C | FAT: " + str(int(last['fat_g'])) + "g F\n"
+        "Quick-log anytime: `!meal " + name + "`"
+    )
+
+
+@bot.command(name="meal")
+async def cmd_meal(ctx: commands.Context, *, name: str = None):
+    """Log a saved meal template. Usage: !meal breakfast"""
+    user_id = str(ctx.author.id)
+
+    if name is None:
+        # Show all templates
+        templates = get_all_templates(user_id)
+        if not templates:
+            await ctx.reply("No saved templates yet. Log a meal, then `!save breakfast` to create one.")
+            return
+        lines = ["**📋 Your Meal Templates**\n"]
+        for t_item in templates:
+            lines.append("  **" + t_item['name'] + "** — FIRE: " + str(t_item['kcal']) + " kcal | MUSCLE: " + str(int(t_item['protein_g'])) + "P | CARBS: " + str(int(t_item['carbs_g'])) + "C | FAT: " + str(int(t_item['fat_g'])) + "F")
+        lines.append("\nLog one: `!meal <name>` · Delete: `!unsave <name>`")
+        await ctx.reply("\n".join(lines))
+        return
+
+    template = get_meal_template(user_id, name)
+    if not template:
+        await ctx.reply("No template named **" + name + "**. See your templates: `!meal`")
+        return
+
+    # Log the meal
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    window_idx = get_current_window_idx(dt)
+    if window_idx < 0:
+        window_idx = 0
+
+    desc = template.get("description", "") or ("template: " + name)
+    water = template.get("water_ml", 0)
+
+    meal_id = add_meal(
+        user_id, day_key, window_idx,
+        template["kcal"], template["protein_g"], template["carbs_g"], template["fat_g"],
+        desc, "Template: " + name, water_ml=water
+    )
+
+    # Auto-log water from template
+    if water > 0:
+        add_water(user_id, water, source="food")
+
+    # Increment counters
+    increment_interaction_count(user_id)
+    record_rate_limit(user_id)
+    increment_daily_hard_cap(user_id)
+
+    # Show confirmation + budget
+    await ctx.reply(
+        "ACTION: Logged **" + name + "** — FIRE: " + str(template['kcal']) + " kcal | MUSCLE: " + str(int(template['protein_g'])) + "P | CARBS: " + str(int(template['carbs_g'])) + "C | FAT: " + str(int(template['fat_g'])) + "F"
+    )
+
+    budget_text = build_budget_text(user_id, day_key, dt)
+    budget_embed = discord.Embed(
+        title="GOAL: Daily Budget",
+        description=budget_text,
+        color=discord.Color.gold(),
+        timestamp=dt,
+    )
+    await ctx.channel.send(embed=budget_embed)
+
+
+@bot.command(name="unsave")
+async def cmd_unsave(ctx: commands.Context, *, name: str = None):
+    """Delete a saved meal template. Usage: !unsave breakfast"""
+    user_id = str(ctx.author.id)
+    if name is None:
+        await ctx.reply("Usage: `!unsave <name>` — deletes a saved template")
+        return
+    deleted = delete_template(user_id, name)
+    if deleted:
+        await ctx.reply("TRASH: Deleted template **" + name + "**")
+    else:
+        await ctx.reply("No template named **" + name + "**. See your templates: `!meal`")
+
+
+@bot.command(name="templates")
+async def cmd_templates(ctx: commands.Context):
+    """List all your saved meal templates."""
+    # Alias for !meal with no args
+    user_id = str(ctx.author.id)
+    templates = get_all_templates(user_id)
+    if not templates:
+        await ctx.reply("No saved templates yet. Log a meal, then `!save breakfast` to create one.")
+        return
+    lines = ["**📋 Your Meal Templates**\n"]
+    for t_item in templates:
+        lines.append("  **" + t_item['name'] + "** — FIRE: " + str(t_item['kcal']) + " kcal | MUSCLE: " + str(int(t_item['protein_g'])) + "P | CARBS: " + str(int(t_item['carbs_g'])) + "C | FAT: " + str(int(t_item['fat_g'])) + "F")
+    lines.append("\nLog one: `!meal <name>` · Delete: `!unsave <name>`")
+    await ctx.reply("\n".join(lines))
 
 
 @bot.command(name="timezone")
@@ -5007,6 +5218,7 @@ async def slash_deletedata(interaction: discord.Interaction, confirm: str = None
     db_execute(conn, "DELETE FROM weight_log WHERE user_id = ?", (user_id,))
     db_execute(conn, "DELETE FROM water_log WHERE user_id = ?", (user_id,))
     db_execute(conn, "DELETE FROM body_fat_log WHERE user_id = ?", (user_id,))
+    db_execute(conn, "DELETE FROM meal_templates WHERE user_id = ?", (user_id,))
     db_execute(conn, "DELETE FROM user_settings WHERE user_id = ?", (user_id,))
     conn.commit()
     release_db(conn)
@@ -5120,6 +5332,94 @@ async def slash_export(interaction: discord.Interaction, period: app_commands.Ch
     lang_text = t(user_id, "export_ready")
     await interaction.response.send_message(lang_text, file=file)
 
+
+@bot.tree.command(name="save", description="Save your last meal as a reusable template")
+@app_commands.describe(name="Template name (e.g. breakfast, chicken-rice)")
+async def slash_save(interaction: discord.Interaction, name: str):
+    """Save your last meal as a template."""
+    user_id = str(interaction.user.id)
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    last = get_last_meal(user_id, day_key)
+    if not last:
+        prev_day = (datetime.strptime(day_key, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        last = get_last_meal(user_id, prev_day)
+    if not last:
+        await interaction.response.send_message("No recent meals to save. Log a meal first.")
+        return
+    is_new = save_meal_template(user_id, name, last["kcal"], last["protein_g"], last["carbs_g"], last["fat_g"], last.get("water_ml", 0), last.get("description", ""))
+    action = "Saved" if is_new else "Updated"
+    await interaction.response.send_message(
+        "ACTION: " + action + " template **" + name + "**\n"
+        "FIRE: " + str(last['kcal']) + " kcal | MUSCLE: " + str(int(last['protein_g'])) + "g P | CARBS: " + str(int(last['carbs_g'])) + "g C | FAT: " + str(int(last['fat_g'])) + "g F\n"
+        "Quick-log: `/meal name:" + name + "`"
+    )
+
+
+@bot.tree.command(name="meal", description="Log a saved meal template")
+@app_commands.describe(name="Template name to log (leave empty to list all)")
+async def slash_meal(interaction: discord.Interaction, name: str = None):
+    """Log a saved meal template."""
+    user_id = str(interaction.user.id)
+    if name is None:
+        templates = get_all_templates(user_id)
+        if not templates:
+            await interaction.response.send_message("No saved templates yet. Log a meal, then `/save name:breakfast`")
+            return
+        lines = ["**📋 Your Meal Templates**\n"]
+        for t_item in templates:
+            lines.append("  **" + t_item['name'] + "** — FIRE: " + str(t_item['kcal']) + " kcal | MUSCLE: " + str(int(t_item['protein_g'])) + "P | CARBS: " + str(int(t_item['carbs_g'])) + "C | FAT: " + str(int(t_item['fat_g'])) + "F")
+        lines.append("\nLog: `/meal name:<name>` · Delete: `/unsave name:<name>`")
+        await interaction.response.send_message("\n".join(lines))
+        return
+    template = get_meal_template(user_id, name)
+    if not template:
+        await interaction.response.send_message("No template named **" + name + "**. Use `/meal` to see all.")
+        return
+    dt = now_user(user_id)
+    day_key = get_food_day(dt)
+    window_idx = get_current_window_idx(dt)
+    if window_idx < 0:
+        window_idx = 0
+    desc = template.get("description", "") or ("template: " + name)
+    water = template.get("water_ml", 0)
+    add_meal(user_id, day_key, window_idx, template["kcal"], template["protein_g"], template["carbs_g"], template["fat_g"], desc, "Template: " + name, water_ml=water)
+    if water > 0:
+        add_water(user_id, water, source="food")
+    increment_interaction_count(user_id)
+    record_rate_limit(user_id)
+    increment_daily_hard_cap(user_id)
+    budget_text = build_budget_text(user_id, day_key, dt)
+    await interaction.response.send_message(
+        "ACTION: Logged **" + name + "** — FIRE: " + str(template['kcal']) + " kcal | MUSCLE: " + str(int(template['protein_g'])) + "P | CARBS: " + str(int(template['carbs_g'])) + "C | FAT: " + str(int(template['fat_g'])) + "F"
+    )
+
+
+@bot.tree.command(name="unsave", description="Delete a saved meal template")
+@app_commands.describe(name="Template name to delete")
+async def slash_unsave(interaction: discord.Interaction, name: str):
+    """Delete a saved meal template."""
+    user_id = str(interaction.user.id)
+    deleted = delete_template(user_id, name)
+    if deleted:
+        await interaction.response.send_message("TRASH: Deleted template **" + name + "**")
+    else:
+        await interaction.response.send_message("No template named **" + name + "**.")
+
+
+@bot.tree.command(name="templates", description="List all your saved meal templates")
+async def slash_templates(interaction: discord.Interaction):
+    """List all your saved meal templates."""
+    user_id = str(interaction.user.id)
+    templates = get_all_templates(user_id)
+    if not templates:
+        await interaction.response.send_message("No saved templates yet. Log a meal, then `/save name:breakfast`")
+        return
+    lines = ["**📋 Your Meal Templates**\n"]
+    for t_item in templates:
+        lines.append("  **" + t_item['name'] + "** — FIRE: " + str(t_item['kcal']) + " kcal | MUSCLE: " + str(int(t_item['protein_g'])) + "P | CARBS: " + str(int(t_item['carbs_g'])) + "C | FAT: " + str(int(t_item['fat_g'])) + "F")
+    lines.append("\nLog: `/meal name:<name>` · Delete: `/unsave name:<name>`")
+    await interaction.response.send_message("\n".join(lines))
 
 
 # HTTP health server for Railway

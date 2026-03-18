@@ -201,7 +201,7 @@ These are evaluated but not yet built. Listed in order of when they'll likely be
 | ~~**Slash commands**~~ | ✅ **Done** | 26 slash commands mirroring all prefix commands. Both systems run in parallel. Dropdown choices, parameter hints, deferred responses |
 | ~~**PostgreSQL migration**~~ | ✅ **Done** | psycopg2 with SimpleConnectionPool (1-10 conns). Dual-mode: auto-detects PostgreSQL via `DATABASE_URL`, falls back to SQLite for local dev. `_q()` helper converts placeholders, `db_fetchone`/`db_fetchall` abstract cursor differences |
 | **Redis caching** | ~200+ users hitting `!budget` at same time | Every `!budget` is 4+ DB queries. Redis caches these at ~1ms vs ~5ms SQLite. Matters when reminder goes out and hundreds check budget at once. Railway offers Redis add-on |
-| **Web dashboard** | Post-traction, premium differentiator | Website for charts, trends, history outside Discord. "MyFitnessPal lite" companion. Major selling point for premium. Significant effort (auth, frontend, API) but natural growth path |
+| ~~**Web dashboard**~~ | ✅ **Done** | Next.js + Tailwind + Discord OAuth on Vercel. Dashboard with charts, meal logging (photo/text/barcode), templates. Connects to same Railway Postgres |
 | **Health app integrations** | After web dashboard | Apple Health, Google Fit, MyFitnessPal sync. Holy grail but requires OAuth flows, webhooks, platform APIs. Apple Health needs native app (ruled out). Google Fit has REST API. CSV export is the stepping stone |
 
 ---
@@ -494,7 +494,7 @@ Expected ~$0.00015/interaction with Gemini 2.5 Flash Lite. Needs live testing to
 - [x] ~~Body fat estimation~~ — **Done.** Navy method, opt-in consent, data minimization, integrated in reports
 - [x] ~~DM-based architecture~~ — **Done.** All tracking via DMs, admin can't see data, auto-registration
 - [x] ~~GDPR right to deletion~~ — **Done.** `!deletedata` command, instant self-service deletion
-- [ ] Meal templates / favorites — save and reuse frequent meals (`!save breakfast1`, `!log breakfast1`)
+- [x] ~~Meal templates~~ — **Done.** `!save breakfast` to save last meal, `!meal breakfast` to quick-log, `!templates` to list, `!unsave` to delete. Works on dashboard too
 - [ ] Recipe analysis — paste a recipe URL and get per-serving macros
 - [ ] Restaurant menu lookup — "I'm eating at McDonald's, Big Mac combo"
 - [x] ~~Export data to CSV~~ — **Done.** `!export week/month/all` as CSV file attachment
@@ -513,7 +513,7 @@ Expected ~$0.00015/interaction with Gemini 2.5 Flash Lite. Needs live testing to
 - [x] ~~Slash commands~~ — **Done.** 26 `/` commands alongside `!` prefix, auto-sync, choices, deferred responses
 - [x] ~~PostgreSQL migration~~ — **Done.** Dual-mode (Postgres + SQLite fallback), connection pool, `_q()` placeholder conversion
 - [ ] Redis caching for frequent DB queries (~200+ users)
-- [ ] Dashboard web UI for viewing history/charts outside Discord
+- [x] ~~Dashboard web UI~~ — **Done.** Next.js dashboard on Vercel with Discord OAuth, meal logging, templates, charts
 - [ ] Webhook integration for MyFitnessPal / Apple Health / Google Fit
 
 ---

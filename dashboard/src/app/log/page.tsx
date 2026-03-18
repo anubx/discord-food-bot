@@ -19,6 +19,17 @@ interface ParsedAnalysis {
   parsed?: AnalysisResult;
 }
 
+interface MealTemplate {
+  id: number;
+  name: string;
+  kcal: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+  water_ml: number;
+  description: string;
+}
+
 export default function LogMealPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
@@ -31,12 +42,34 @@ export default function LogMealPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [templates, setTemplates] = useState<MealTemplate[]>([]);
+  const [loadingTemplates, setLoadingTemplates] = useState(true);
+  const [loggingTemplate, setLoggingTemplate] = useState<string | null>(null);
 
   useEffect(() => {
     if (status === 'unauthenticated') {
       router.push('/login');
     }
   }, [status, router]);
+
+  useEffect(() => {
+    const fetchTemplates = async () => {
+      try {
+        const res = await fetch('/api/templates');
+        if (res.ok) {
+          const data = await res.json();
+          setTemplates(data.templates || []);
+        }
+      } catch (err) {
+        console.error('Failed to load templates:', err);
+      } finally {
+        setLoadingTemplates(false);
+      }
+    };
+    if (status === 'authenticated') {
+      fetchTemplates();
+    }
+  }, [status]);
 
   const handlePhotoSelect = (file: File) => {
     setPhotoFile(file);
@@ -137,6 +170,30 @@ export default function LogMealPage() {
     }
   };
 
+  const logTemplate = async (template: MealTemplate) => {
+    setLoggingTemplate(template.name);
+    setError(null);
+
+    try {
+      const res = await fetch('/api/templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ templateName: template.name }),
+      });
+
+      if (!res.ok) throw new Error('Failed to log template');
+      setSuccess(true);
+
+      setTimeout(() => {
+        router.push('/');
+      }, 1500);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoggingTemplate(null);
+    }
+  };
+
   if (status === 'loading') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-950">
@@ -157,6 +214,30 @@ export default function LogMealPage() {
           <h1 className="text-2xl font-bold text-white mt-4">Log a Meal</h1>
           <p className="text-sm text-slate-500 mt-0.5">Use AI to analyze your food and track macros</p>
         </div>
+
+        {!loadingTemplates && templates.length > 0 && (
+          <div className="max-w-2xl mx-auto mb-6 bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl p-6">
+            <h2 className="text-lg font-semibold text-white mb-4">📋 Quick Log from Template</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {templates.map((template) => (
+                <button
+                  key={template.id}
+                  onClick={() => logTemplate(template)}
+                  disabled={loggingTemplate === template.name || success}
+                  className="p-3 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-700 disabled:opacity-50 rounded-lg border border-slate-700 hover:border-green-500 transition-all text-left"
+                >
+                  <div className="text-sm font-medium text-white">{template.name}</div>
+                  <div className="text-xs text-slate-400 mt-1">
+                    {template.kcal} kcal • {Math.round(template.protein_g)}P • {Math.round(template.carbs_g)}C • {Math.round(template.fat_g)}F
+                  </div>
+                  {loggingTemplate === template.name && (
+                    <div className="text-xs text-green-400 mt-1">Logging...</div>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="max-w-2xl mx-auto bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl overflow-hidden">
           <div className="flex border-b border-slate-800">
