@@ -95,7 +95,7 @@ export async function getWeekTotals(userId: string, endDate: string) {
   const result = await query(
     `SELECT day_key, SUM(kcal) as day_kcal, SUM(protein_g) as day_protein,
             SUM(carbs_g) as day_carbs, SUM(fat_g) as day_fat
-     FROM meals WHERE user_id = $1 AND day_key > $2::date - interval '7 days' AND day_key <= $2
+     FROM meals WHERE user_id = $1 AND day_key > ($2::date - interval '7 days')::text AND day_key <= $2
      GROUP BY day_key ORDER BY day_key`,
     [userId, endDate]
   );
