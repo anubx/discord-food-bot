@@ -1,0 +1,212 @@
+FoodTracker Dashboard - Complete File Manifest
+===============================================
+
+PROJECT ROOT
+============
+package.json                    - Dependencies and scripts
+tsconfig.json                   - TypeScript configuration
+next.config.js                  - Next.js configuration
+tailwind.config.ts              - Tailwind CSS theme
+postcss.config.js               - PostCSS + Autoprefixer config
+.env.local.example              - Environment variables template
+.gitignore                       - Git ignore rules
+README.md                        - Project overview
+SETUP.md                         - Detailed setup guide
+FILE_MANIFEST.txt               - This file
+
+SRC/APP (Next.js App Router)
+===========================
+src/app/layout.tsx              - Root layout with SessionProvider
+src/app/globals.css             - Global styles (Tailwind imports)
+src/app/page.tsx                - Main dashboard page
+  - Fetches /api/stats
+  - Displays all dashboard cards
+  - Real-time nutrition tracking
+  
+src/app/login/page.tsx          - Discord OAuth login page
+  - "Sign in with Discord" button
+  - Auto-redirect if authenticated
+  
+src/app/log/page.tsx            - Meal logging page with AI analysis
+  - Photo upload, text description, barcode tabs
+  - Calls /api/analyze with Gemini
+  - Calls /api/meals to save
+
+SRC/APP/API (Backend Routes)
+============================
+src/app/api/auth/[...nextauth]/route.ts
+  - NextAuth.js Discord OAuth handler
+  - GET/POST handlers for auth flow
+
+src/app/api/stats/route.ts
+  - GET only
+  - Returns dashboard data for authenticated user
+  - Calculates totals, streaks, charts
+
+src/app/api/meals/route.ts
+  - POST only
+  - Saves meal to PostgreSQL
+  - Parses AI response ($$TOTALS$$)
+  - Auto-logs food water
+
+src/app/api/analyze/route.ts
+  - POST only
+  - Sends food to Google Gemini API
+  - Handles photo upload or text input
+  - Returns AI analysis with macros
+
+SRC/COMPONENTS (React Components)
+=================================
+src/components/Sidebar.tsx
+  - Fixed left sidebar navigation
+  - Logo, nav links, user info
+  - Sign out button
+
+src/components/StatCard.tsx
+  - Reusable stat card component
+  - Shows value, target, progress bar
+  - 5 variants: Calories, Protein, Carbs, Fat, Water
+
+src/components/MealsTable.tsx
+  - Displays meals logged today
+  - Time, description, macros, water
+  - Meal window emojis
+
+src/components/CalorieChart.tsx
+  - 7-day bar chart
+  - Green for under target, red for over
+  - Target line at top
+
+src/components/MacroRing.tsx
+  - Circular macro breakdown chart
+  - SVG rings for P/C/F percentages
+  - Center shows total calories
+
+src/components/WeightCard.tsx
+  - Last 7 weight entries as mini bars
+  - Change this week
+  - Trend indication (up/down/stable)
+
+src/components/WaterCard.tsx
+  - Current vs target water
+  - 10-glass progress indicator
+  - Breakdown: food water, manual, remaining
+
+src/components/StreakCard.tsx
+  - Days on target (consecutive)
+  - Achievement badges (3d, 7d, 14d, 30d)
+  - Best streak, weekly average
+
+SRC/LIB (Utilities & Config)
+============================
+src/lib/auth.ts
+  - NextAuth.js configuration
+  - Discord provider setup
+  - JWT and session callbacks
+  - Extract Discord ID and store in session
+
+src/lib/db.ts
+  - PostgreSQL connection with pg pool
+  - Helper functions:
+    * getUserByDiscordId()
+    * getDayMeals()
+    * getDayTotals()
+    * getWeightHistory()
+    * getDayWater()
+    * getStreak()
+    * getWeekTotals()
+    * addMeal()
+    * addWater()
+  - Handles 4 AM food day boundary
+  - SSL config for Railway internal
+
+FEATURES
+========
+✓ Discord OAuth login
+✓ Dashboard with 5 stat cards
+✓ Weekly calorie chart
+✓ Macro ring breakdown
+✓ Today's meals table with times
+✓ Weight history chart
+✓ Water tracking with glass counter
+✓ Streak counter with achievement badges
+✓ AI-powered meal logging
+  - Photo analysis with Gemini
+  - Text description analysis
+  - Auto water logging from food
+✓ Responsive dark theme UI
+✓ Real-time stat updates (30s refresh)
+✓ PostgreSQL database integration
+✓ TypeScript throughout
+
+AUTHENTICATION FLOW
+===================
+1. User visits /login
+2. Clicks "Sign in with Discord"
+3. Redirects to Discord OAuth
+4. Discord confirms, redirects to /api/auth/callback/discord
+5. NextAuth creates session with Discord ID in JWT
+6. Redirected to dashboard (/)
+7. Dashboard checks session, fetches user data from DB using Discord ID
+
+API FLOW
+========
+Dashboard (/):
+1. Checks session (useSession hook)
+2. Calls GET /api/stats
+3. Returns user targets, today's totals, meals, charts
+4. Displays all components with real data
+
+Meal Logging (/log):
+1. Photo upload / text description
+2. User clicks "Analyze Meal"
+3. POST /api/analyze → Gemini
+4. AI returns nutrition with $$TOTALS$$
+5. User sees parsed nutrition
+6. Click "Log Meal"
+7. POST /api/meals → saves to DB
+8. Redirects to dashboard
+
+DATABASE INTEGRATION
+====================
+- Uses same PostgreSQL as Discord bot
+- Reads from: user_settings, meals, weight_log, water_log
+- Writes to: meals, water_log
+- Discord ID is primary key across all tables
+- 4 AM food day boundary (matches bot logic)
+- Connection pooling (max 5 connections)
+- SSL disabled for railway.internal
+
+STYLING
+=======
+- Tailwind CSS with custom color scheme
+- Dark theme (slate-900, slate-950 backgrounds)
+- Green accent color (#22c55e)
+- Responsive grid layouts
+- Hover states and transitions
+- Custom scrollbar styling
+
+DEPLOYMENT
+==========
+Ready to deploy to:
+- Vercel (built-in Next.js support)
+- Docker (Dockerfile can be added)
+- Traditional Node.js server
+- Railway, Fly.io, AWS, etc.
+
+Environment variables needed:
+- DISCORD_CLIENT_ID
+- DISCORD_CLIENT_SECRET
+- NEXTAUTH_URL (your domain)
+- NEXTAUTH_SECRET (generated)
+- DATABASE_URL (PostgreSQL connection)
+- GEMINI_API_KEY
+
+NOTES
+=====
+- No external chart library (uses CSS/SVG)
+- No UI framework (pure Tailwind)
+- Strict mode disabled for easier development
+- Uses @/ path alias for imports
+- All components are client-side (marked 'use client')
+- Server-side rendering for layout only
