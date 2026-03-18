@@ -92,12 +92,18 @@ export async function getStreak(userId: string, targetKcal: number) {
 
 // Get week totals for chart
 export async function getWeekTotals(userId: string, endDate: string) {
+  // Compute start date in JS to avoid PostgreSQL text/timestamp type mismatch
+  const end = new Date(endDate);
+  const start = new Date(end);
+  start.setDate(start.getDate() - 7);
+  const startDate = start.toISOString().split('T')[0];
+
   const result = await query(
     `SELECT day_key, SUM(kcal) as day_kcal, SUM(protein_g) as day_protein,
             SUM(carbs_g) as day_carbs, SUM(fat_g) as day_fat
-     FROM meals WHERE user_id = $1 AND day_key > ($2::date - interval '7 days')::text AND day_key <= $2
+     FROM meals WHERE user_id = $1 AND day_key > $2 AND day_key <= $3
      GROUP BY day_key ORDER BY day_key`,
-    [userId, endDate]
+    [userId, startDate, endDate]
   );
   return result.rows;
 }
